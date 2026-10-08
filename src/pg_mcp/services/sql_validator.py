@@ -12,6 +12,7 @@ from sqlglot import exp
 
 from pg_mcp.config.settings import SecurityConfig
 from pg_mcp.models.errors import SecurityViolationError, SQLParseError
+from pg_mcp.models.query import ValidationResult
 
 
 class SQLValidator:
@@ -114,11 +115,56 @@ class SQLValidator:
         except (SecurityViolationError, SQLParseError) as e:
             return (False, str(e))
 
+    @staticmethod
+    def _valid_result() -> ValidationResult:
+        """Build the ValidationResult for SQL that passed every check."""
+        return ValidationResult(
+            is_valid=True,
+            is_select=True,
+            allows_data_modification=False,
+            uses_blocked_functions=[],
+            error_message=None,
+        )
+
     def validate_or_raise(self, sql: str) -> None:
         """Validate SQL query and raise exception on violation.
 
         Args:
             sql: SQL query string to validate.
+
+        Raises:
+            SQLParseError: If SQL cannot be parsed.
+            SecurityViolationError: If SQL violates security constraints.
+        """
+        self._analyze(sql)
+
+    def validate_with_result(self, sql: str) -> ValidationResult:
+        """Validate SQL and return a detailed validation result.
+
+        Behavior on failure is identical to validate_or_raise; on success the
+        returned model reflects the checks actually performed instead of a
+        hardcoded "valid" result.
+
+        Args:
+            sql: SQL query string to validate.
+
+        Returns:
+            ValidationResult: Populated validation outcome.
+
+        Raises:
+            SQLParseError: If SQL cannot be parsed.
+            SecurityViolationError: If SQL violates security constraints.
+        """
+        return self._analyze(sql)
+
+    def _analyze(self, sql: str) -> ValidationResult:
+        """Run every security check and return the validation outcome.
+
+        Args:
+            sql: SQL query string to validate.
+
+        Returns:
+            ValidationResult: Populated outcome for SQL that passed all checks.
 
         Raises:
             SQLParseError: If SQL cannot be parsed.
@@ -160,7 +206,7 @@ class SQLValidator:
                 # sqlglot 28.5.0 cannot parse EXPLAIN syntax reliably (falls back to Command),
                 # so we don't attempt to validate the inner query string to avoid false positives.
                 # Even "EXPLAIN DELETE" is safe as it won't actually delete data.
-                return None
+                return self._valid_result()
             else:
                 # Other commands are not allowed
                 raise SecurityViolationError(
@@ -192,6 +238,8 @@ class SQLValidator:
 
         if error := self._check_subquery_safety(statement):
             raise SecurityViolationError(error)
+
+        return self._valid_result()
 
     def _check_statement_type(self, statement: exp.Expression) -> str | None:
         """Check if statement type is allowed.

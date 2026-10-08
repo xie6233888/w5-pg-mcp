@@ -20,10 +20,16 @@ from pg_mcp.models.query import (
     QueryRequest,
     ResultValidationResult,
     ReturnType,
+    ValidationResult,
 )
 from pg_mcp.models.schema import ColumnInfo, DatabaseSchema, TableInfo
 from pg_mcp.resilience.circuit_breaker import CircuitState
 from pg_mcp.services.orchestrator import QueryOrchestrator
+
+
+def _valid_validation() -> ValidationResult:
+    """A passing SQL validation result, for validator mocks."""
+    return ValidationResult(is_valid=True, is_select=True)
 
 
 class TestDatabaseResolution:
@@ -157,7 +163,7 @@ class TestSQLGenerationWithRetry:
         mock_generator.generate.return_value = "SELECT * FROM users;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.return_value = None  # No exception = valid
+        mock_validator.validate_with_result.return_value = _valid_validation()
 
         orchestrator = QueryOrchestrator(
             sql_generator=mock_generator,
@@ -182,7 +188,7 @@ class TestSQLGenerationWithRetry:
         assert validation_result.is_valid is True
         assert validation_result.is_select is True
         mock_generator.generate.assert_called_once()
-        mock_validator.validate_or_raise.assert_called_once_with("SELECT * FROM users;")
+        mock_validator.validate_with_result.assert_called_once_with("SELECT * FROM users;")
 
     @pytest.mark.asyncio
     async def test_generate_sql_retry_on_validation_failure(
@@ -198,9 +204,9 @@ class TestSQLGenerationWithRetry:
 
         mock_validator = MagicMock()
         # First call raises error, second call succeeds
-        mock_validator.validate_or_raise.side_effect = [
+        mock_validator.validate_with_result.side_effect = [
             SQLParseError('relation "user" does not exist'),
-            None,  # Success on second attempt
+            ValidationResult(is_valid=True, is_select=True),  # Success on second attempt
         ]
 
         orchestrator = QueryOrchestrator(
@@ -225,7 +231,7 @@ class TestSQLGenerationWithRetry:
         assert sql == "SELECT * FROM users;"
         assert validation_result.is_valid is True
         assert mock_generator.generate.call_count == 2
-        assert mock_validator.validate_or_raise.call_count == 2
+        assert mock_validator.validate_with_result.call_count == 2
 
         # Verify retry included error feedback
         second_call = mock_generator.generate.call_args_list[1]
@@ -240,7 +246,7 @@ class TestSQLGenerationWithRetry:
         mock_generator.generate.return_value = "DELETE FROM users;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.side_effect = SecurityViolationError(
+        mock_validator.validate_with_result.side_effect = SecurityViolationError(
             "DELETE statements are not allowed"
         )
 
@@ -455,7 +461,7 @@ class TestExecuteQueryFlow:
         mock_generator.generate.return_value = "SELECT * FROM users;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.return_value = None
+        mock_validator.validate_with_result.return_value = _valid_validation()
 
         mock_cache = MagicMock()
         mock_cache.get.return_value = mock_schema
@@ -495,7 +501,7 @@ class TestExecuteQueryFlow:
         mock_generator.generate.return_value = "SELECT id, name FROM users;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.return_value = None
+        mock_validator.validate_with_result.return_value = _valid_validation()
 
         mock_executor = AsyncMock()
         mock_executor.execute.return_value = (
@@ -564,7 +570,7 @@ class TestExecuteQueryFlow:
         mock_generator.generate.return_value = "SELECT 1;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.return_value = None
+        mock_validator.validate_with_result.return_value = _valid_validation()
 
         mock_pool = MagicMock()
 
@@ -641,7 +647,9 @@ class TestExecuteQueryFlow:
         mock_generator.generate.return_value = "DELETE FROM users;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.side_effect = SecurityViolationError("DELETE not allowed")
+        mock_validator.validate_with_result.side_effect = SecurityViolationError(
+            "DELETE not allowed"
+        )
 
         orchestrator = QueryOrchestrator(
             sql_generator=mock_generator,
@@ -679,7 +687,7 @@ class TestExecuteQueryFlow:
         mock_generator.generate.return_value = "SELECT * FROM users;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.return_value = None
+        mock_validator.validate_with_result.return_value = _valid_validation()
 
         mock_executor = AsyncMock()
         mock_executor.execute.side_effect = DatabaseError("Query execution failed")
@@ -752,7 +760,7 @@ class TestExecuteQueryFlow:
         mock_generator.generate.return_value = "SELECT 1;"
 
         mock_validator = MagicMock()
-        mock_validator.validate_or_raise.return_value = None
+        mock_validator.validate_with_result.return_value = _valid_validation()
 
         orchestrator = QueryOrchestrator(
             sql_generator=mock_generator,
@@ -791,7 +799,7 @@ class TestExecutorSelection:
         gen = AsyncMock()
         gen.generate.return_value = "SELECT 1;"
         val = MagicMock()
-        val.validate_or_raise.return_value = None
+        val.validate_with_result.return_value = _valid_validation()
         rv = AsyncMock()
         rv.validate.return_value = ResultValidationResult(
             confidence=90, explanation="ok", suggestion=None, is_acceptable=True
@@ -819,7 +827,7 @@ class TestExecutorSelection:
         gen = AsyncMock()
         gen.generate.return_value = "SELECT 1;"
         val = MagicMock()
-        val.validate_or_raise.return_value = None
+        val.validate_with_result.return_value = _valid_validation()
         cache = MagicMock()
         cache.get.return_value = DatabaseSchema(database_name="db1", tables=[], version="15")
         orch = QueryOrchestrator(

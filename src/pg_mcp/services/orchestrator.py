@@ -431,7 +431,7 @@ class QueryOrchestrator:
 
                 # Validate SQL
                 try:
-                    self.sql_validator.validate_or_raise(generated_sql)
+                    validation_result = self.sql_validator.validate_with_result(generated_sql)
                 except (SecurityViolationError, SQLParseError) as validation_error:
                     if attempt < max_retries:
                         # Record as failure and retry with feedback
@@ -467,15 +467,6 @@ class QueryOrchestrator:
                         "request_id": request_id,
                         "attempts": attempt + 1,
                     },
-                )
-
-                # Build validation result
-                validation_result = ValidationResult(
-                    is_valid=True,
-                    is_select=True,
-                    allows_data_modification=False,
-                    uses_blocked_functions=[],
-                    error_message=None,
                 )
 
                 return generated_sql, validation_result, tokens_used
