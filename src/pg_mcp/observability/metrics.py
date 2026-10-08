@@ -184,6 +184,48 @@ class MetricsCollector:
         """
         self.schema_cache_age.labels(database=database).set(age_seconds)
 
+    def observe_query_duration(self, duration_seconds: float) -> None:
+        """Record end-to-end query request duration.
+
+        Args:
+            duration_seconds: Wall-clock duration of a full query request.
+        """
+        self.query_duration.observe(duration_seconds)
+
+    def get_query_request_count(self, status: str, database: str) -> int:
+        """Read the current query request counter (tests/diagnostics).
+
+        Args:
+            status: Query status label.
+            database: Database name label.
+
+        Returns:
+            int: Current counter value.
+        """
+        return int(self.query_requests.labels(status=status, database=database)._value.get())
+
+    def get_llm_call_count(self, operation: str) -> int:
+        """Read the current LLM call counter (tests/diagnostics).
+
+        Args:
+            operation: LLM operation label.
+
+        Returns:
+            int: Current counter value.
+        """
+        return int(self.llm_calls.labels(operation=operation)._value.get())
+
+    def get_sql_rejected_count(self, reason: str) -> int:
+        """Read the current SQL rejection counter (tests/diagnostics).
+
+        Args:
+            reason: Rejection reason label.
+
+        Returns:
+            int: Current counter value.
+        """
+        return int(self.sql_rejected.labels(reason=reason)._value.get())
+
     def reset_all_metrics(self) -> None:
         """Reset all metrics to initial state.
 

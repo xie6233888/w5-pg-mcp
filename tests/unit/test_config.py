@@ -525,3 +525,22 @@ class TestMultiDatabaseSettings:
                 database=DatabaseConfig(name="main"),
                 databases=[DatabaseConfig(name="dup"), DatabaseConfig(name="dup")],
             )
+
+
+class TestResilienceConfigNewFields:
+    """ResilienceConfig: rate limit knobs."""
+
+    def test_defaults(self) -> None:
+        config = ResilienceConfig()
+        assert config.max_concurrent_queries == 10
+        assert config.max_concurrent_llm_calls == 5
+        assert config.rate_limit_timeout == 60.0
+
+    def test_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RESILIENCE_MAX_CONCURRENT_QUERIES", "20")
+        monkeypatch.setenv("RESILIENCE_MAX_CONCURRENT_LLM_CALLS", "8")
+        monkeypatch.setenv("RESILIENCE_RATE_LIMIT_TIMEOUT", "30.0")
+        config = ResilienceConfig()
+        assert config.max_concurrent_queries == 20
+        assert config.max_concurrent_llm_calls == 8
+        assert config.rate_limit_timeout == 30.0

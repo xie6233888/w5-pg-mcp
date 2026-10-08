@@ -6,6 +6,7 @@ including retry logic, error handling, and integration with all components.
 
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import pytest
 
 from pg_mcp.config.settings import ResilienceConfig, ValidationConfig
@@ -411,7 +412,7 @@ class TestResultValidation:
             validation_config=ValidationConfig(enabled=True),
         )
 
-        # Should not raise, returns default confidence
+        # Should not raise; a failed validation yields neutral (not maximal) confidence
         confidence = await orchestrator._validate_results_safely(
             question="Count users",
             sql="SELECT COUNT(*) FROM users",
@@ -420,7 +421,7 @@ class TestResultValidation:
             request_id="test-123",
         )
 
-        assert confidence == 100
+        assert confidence == 50
 
 
 class TestExecuteQueryFlow:
@@ -844,3 +845,200 @@ class TestExecutorSelection:
         assert not response.success
         assert response.error is not None
         assert response.error.code == ErrorCode.DATABASE_ERROR.value
+
+
+def _database_error_with_cause(cause: Exception) -> DatabaseError:
+    """Build a DatabaseError mimicking how SQLExecutor wraps asyncpg errors."""
+    err = DatabaseError(message="Database query failed")
+    err.__cause__ = cause
+    return err
+
+
+class TestQuestionLengthGuard:
+    """Review Focus: boundary behavior of max_question_length."""
+
+    def _orchestrator(self, max_length: int) -> QueryOrchestrator:
+        executor = AsyncMock()
+        executor.execute.return_value = ([{"n": 1}], 1)
+        return QueryOrchestrator(
+            sql_generator=AsyncMock(),
+            sql_validator=MagicMock(),
+            sql_executors={"db": executor},
+            result_validator=AsyncMock(),
+            schema_cache=MagicMock(),
+            pools={"db": MagicMock()},
+            resilience_config=ResilienceConfig(),
+            validation_config=ValidationConfig(max_question_length=max_length),
+        )
+
+    @pytest.mark.asyncio
+    async def test_question_at_limit_is_accepted(self) -> None:
+        orch = self._orchestrator(max_length=20)
+        orch.sql_generator.generate.return_value = ("SELECT 1;", 5)
+        orch.sql_validator.validate_with_result.return_value = ValidationResult(
+            is_valid=True, is_select=True
+        )
+        orch.schema_cache.get.return_value = DatabaseSchema(
+            database_name="db", tables=[], version="15"
+        )
+        response = await orch.execute_query(QueryRequest(question="x" * 20, database="db"))
+        assert response.success
+
+    @pytest.mark.asyncio
+    async def test_question_over_limit_rejected_with_code(self) -> None:
+        orch = self._orchestrator(max_length=20)
+        response = await orch.execute_query(QueryRequest(question="x" * 21, database="db"))
+        assert not response.success
+        assert response.error is not None
+        assert response.error.code == ErrorCode.QUESTION_TOO_LONG.value
+
+
+class TestOrchestratorMetrics:
+    """Metrics are emitted on success and failure paths."""
+
+    @pytest.mark.asyncio
+    async def test_success_increments_counters(self) -> None:
+        from pg_mcp.observability.metrics import metrics as m
+
+        orch = QueryOrchestrator(
+            sql_generator=AsyncMock(),
+            sql_validator=MagicMock(),
+            sql_executors={"db": MagicMock()},
+            result_validator=AsyncMock(),
+            schema_cache=MagicMock(),
+            pools={"db": MagicMock()},
+            resilience_config=ResilienceConfig(),
+            validation_config=ValidationConfig(),
+            metrics=m,
+        )
+        orch.sql_generator.generate.return_value = ("SELECT 1;", 7)
+        orch.sql_validator.validate_with_result.return_value = ValidationResult(
+            is_valid=True, is_select=True
+        )
+        orch.sql_executors["db"].execute = AsyncMock(return_value=([{"n": 1}], 1))
+        orch.result_validator.validate.return_value = ResultValidationResult(
+            confidence=90, explanation="ok", suggestion=None, is_acceptable=True
+        )
+        orch.schema_cache.get.return_value = DatabaseSchema(
+            database_name="db", tables=[], version="15"
+        )
+
+        before = m.get_query_request_count("success", "db")
+        llm_before = m.get_llm_call_count("generate_sql")
+        response = await orch.execute_query(QueryRequest(question="q", database="db"))
+        assert response.success
+        assert m.get_query_request_count("success", "db") == before + 1
+        assert m.get_llm_call_count("generate_sql") == llm_before + 1
+        assert response.tokens_used == 7
+
+    @pytest.mark.asyncio
+    async def test_security_rejection_increments_rejected_counter(self) -> None:
+        from pg_mcp.observability.metrics import metrics as m
+
+        orch = QueryOrchestrator(
+            sql_generator=AsyncMock(),
+            sql_validator=MagicMock(),
+            sql_executors={"db": MagicMock()},
+            result_validator=AsyncMock(),
+            schema_cache=MagicMock(),
+            pools={"db": MagicMock()},
+            resilience_config=ResilienceConfig(),
+            validation_config=ValidationConfig(),
+            metrics=m,
+        )
+        orch.sql_generator.generate.return_value = ("DELETE FROM users;", 5)
+        orch.sql_validator.validate_with_result.side_effect = SecurityViolationError(
+            "DELETE statements are not allowed"
+        )
+        orch.schema_cache.get.return_value = DatabaseSchema(
+            database_name="db", tables=[], version="15"
+        )
+        before = m.get_sql_rejected_count("security_violation")
+        response = await orch.execute_query(QueryRequest(question="q", database="db"))
+        assert not response.success
+        assert m.get_sql_rejected_count("security_violation") == before + 1
+
+
+class TestOrchestratorRetry:
+    """Transient DB errors are retried; deterministic errors are not."""
+
+    def _orchestrator(self, executor: AsyncMock) -> QueryOrchestrator:
+        orch = QueryOrchestrator(
+            sql_generator=AsyncMock(),
+            sql_validator=MagicMock(),
+            sql_executors={"db": executor},
+            result_validator=AsyncMock(),
+            schema_cache=MagicMock(),
+            pools={"db": MagicMock()},
+            resilience_config=ResilienceConfig(max_retries=2, retry_delay=0.1),
+            validation_config=ValidationConfig(),
+        )
+        orch.sql_generator.generate.return_value = ("SELECT 1;", 1)
+        orch.sql_validator.validate_with_result.return_value = ValidationResult(
+            is_valid=True, is_select=True
+        )
+        orch.schema_cache.get.return_value = DatabaseSchema(
+            database_name="db", tables=[], version="15"
+        )
+        return orch
+
+    @pytest.mark.asyncio
+    async def test_transient_db_error_is_retried(self) -> None:
+        executor = AsyncMock()
+        transient = asyncpg.ConnectionDoesNotExistError("closed")
+        executor.execute.side_effect = [
+            _database_error_with_cause(transient),
+            ([{"n": 1}], 1),
+        ]
+        orch = self._orchestrator(executor)
+        response = await orch.execute_query(QueryRequest(question="q", database="db"))
+        assert response.success
+        assert executor.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_deterministic_db_error_is_not_retried(self) -> None:
+        executor = AsyncMock()
+        executor.execute.side_effect = [
+            _database_error_with_cause(asyncpg.PostgresError("syntax error")),
+        ]
+        orch = self._orchestrator(executor)
+        response = await orch.execute_query(QueryRequest(question="q", database="db"))
+        assert not response.success
+        assert executor.execute.await_count == 1
+
+
+class TestRateLimitIntegration:
+    """Rate limiter saturation yields a clean error, never a raw TimeoutError."""
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_timeout_converted(self) -> None:
+        from pg_mcp.resilience.rate_limiter import MultiRateLimiter
+
+        limiter = MultiRateLimiter(query_limit=1, llm_limit=1)
+        orch = QueryOrchestrator(
+            sql_generator=AsyncMock(),
+            sql_validator=MagicMock(),
+            sql_executors={"db": AsyncMock()},
+            result_validator=AsyncMock(),
+            schema_cache=MagicMock(),
+            pools={"db": MagicMock()},
+            resilience_config=ResilienceConfig(rate_limit_timeout=1.0),
+            validation_config=ValidationConfig(enabled=False),
+            rate_limiter=limiter,
+        )
+        orch.sql_generator.generate.return_value = ("SELECT 1;", 1)
+        orch.sql_validator.validate_with_result.return_value = ValidationResult(
+            is_valid=True, is_select=True
+        )
+        orch.schema_cache.get.return_value = DatabaseSchema(
+            database_name="db", tables=[], version="15"
+        )
+
+        # Occupy the only query slot; the request must wait, time out, and
+        # surface as a clean rate_limit_exceeded error.
+        async with limiter.for_queries():
+            response = await orch.execute_query(QueryRequest(question="q", database="db"))
+
+        assert not response.success
+        assert response.error is not None
+        assert response.error.code == ErrorCode.RATE_LIMIT_EXCEEDED.value

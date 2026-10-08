@@ -233,6 +233,18 @@ class ResilienceConfig(BaseSettings):
     circuit_breaker_timeout: float = Field(
         default=60.0, ge=10.0, le=300.0, description="Circuit breaker timeout in seconds"
     )
+    max_concurrent_queries: int = Field(
+        default=10, ge=1, le=1000, description="Maximum concurrent database queries"
+    )
+    max_concurrent_llm_calls: int = Field(
+        default=5, ge=1, le=1000, description="Maximum concurrent LLM API calls"
+    )
+    rate_limit_timeout: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=600.0,
+        description="Max seconds to wait for a rate limiter slot before failing",
+    )
 
 
 class ObservabilityConfig(BaseSettings):
