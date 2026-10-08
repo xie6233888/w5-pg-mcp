@@ -292,7 +292,7 @@ class TestObservabilityConfig:
         # 生产环境应该通过环境变量显式设置
         assert config.metrics_port == 9090
         assert config.log_level == "INFO"
-        assert config.log_format == "json"
+        assert config.log_format == "text"
 
     def test_custom_values(self) -> None:
         """Test custom configuration values."""
