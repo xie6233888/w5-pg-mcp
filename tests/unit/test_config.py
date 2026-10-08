@@ -200,24 +200,68 @@ class TestValidationConfig:
         """Test default configuration values."""
         config = ValidationConfig()
         assert config.max_question_length == 10000
-        assert config.min_confidence_score == 70
+        assert config.confidence_threshold == 70
 
     def test_custom_values(self) -> None:
         """Test custom configuration values."""
         config = ValidationConfig(
             max_question_length=5000,
-            min_confidence_score=80,
+            confidence_threshold=80,
         )
         assert config.max_question_length == 5000
-        assert config.min_confidence_score == 80
+        assert config.confidence_threshold == 80
 
-    def test_invalid_confidence_score(self) -> None:
-        """Test invalid confidence score is rejected."""
+    def test_invalid_confidence_threshold(self) -> None:
+        """Test invalid confidence threshold is rejected."""
         with pytest.raises(ValidationError):
-            ValidationConfig(min_confidence_score=-1)
+            ValidationConfig(confidence_threshold=-1)
 
         with pytest.raises(ValidationError):
-            ValidationConfig(min_confidence_score=101)
+            ValidationConfig(confidence_threshold=101)
+
+
+class TestValidationConfigCleanup:
+    """ValidationConfig: min_confidence_score removed (duplicate of confidence_threshold)."""
+
+    def test_min_confidence_score_removed(self) -> None:
+        """The unused duplicate field must not exist."""
+        config = ValidationConfig()
+        assert not hasattr(config, "min_confidence_score")
+
+    def test_confidence_threshold_still_enforced_default(self) -> None:
+        config = ValidationConfig()
+        assert config.confidence_threshold == 70
+
+
+class TestSecurityConfigNewFields:
+    """SecurityConfig: blocked_tables / blocked_columns / allow_explain."""
+
+    def test_defaults_empty_and_false(self) -> None:
+        config = SecurityConfig()
+        assert config.blocked_tables == []
+        assert config.blocked_columns == []
+        assert config.allow_explain is False
+
+    def test_blocked_tables_from_env_csv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SECURITY_BLOCKED_TABLES", "secret_table, audit_log ,")
+        config = SecurityConfig()
+        assert config.blocked_tables == ["secret_table", "audit_log"]
+
+    def test_blocked_columns_from_env_csv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SECURITY_BLOCKED_COLUMNS", "password,ssn")
+        config = SecurityConfig()
+        assert config.blocked_columns == ["password", "ssn"]
+
+    def test_allow_explain_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SECURITY_ALLOW_EXPLAIN", "true")
+        config = SecurityConfig()
+        assert config.allow_explain is True
+
+    def test_blocked_tables_accept_list_directly(self) -> None:
+        config = SecurityConfig(blocked_tables=["t1"], blocked_columns=["c1"], allow_explain=True)
+        assert config.blocked_tables == ["t1"]
+        assert config.blocked_columns == ["c1"]
+        assert config.allow_explain is True
 
 
 class TestCacheConfig:

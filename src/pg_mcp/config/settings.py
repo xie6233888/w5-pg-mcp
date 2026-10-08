@@ -98,6 +98,17 @@ class SecurityConfig(BaseSettings):
     safe_search_path: str = Field(
         default="public", description="Safe search_path to set during query execution"
     )
+    blocked_tables: list[str] = Field(
+        default_factory=list,
+        description="Table names that queries are not allowed to reference",
+    )
+    blocked_columns: list[str] = Field(
+        default_factory=list,
+        description="Column names that queries are not allowed to reference",
+    )
+    allow_explain: bool = Field(
+        default=False, description="Whether EXPLAIN statements are allowed"
+    )
 
     @field_validator("blocked_functions", mode="before")
     @classmethod
@@ -105,6 +116,14 @@ class SecurityConfig(BaseSettings):
         """Parse comma-separated string or list."""
         if isinstance(v, str):
             return [f.strip() for f in v.split(",") if f.strip()]
+        return v
+
+    @field_validator("blocked_tables", "blocked_columns", mode="before")
+    @classmethod
+    def parse_string_list(cls, v: str | list[str]) -> list[str]:
+        """Parse comma-separated string or list."""
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
 
@@ -115,9 +134,6 @@ class ValidationConfig(BaseSettings):
 
     max_question_length: int = Field(
         default=10000, ge=1, le=50000, description="Maximum question length in characters"
-    )
-    min_confidence_score: int = Field(
-        default=70, ge=0, le=100, description="Minimum confidence score (0-100)"
     )
 
     # Result validation settings
