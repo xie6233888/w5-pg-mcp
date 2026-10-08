@@ -7,6 +7,8 @@ and error codes for structured error reporting.
 from enum import StrEnum
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 
 class ErrorCode(StrEnum):
     """Standardized error codes for the application."""
@@ -36,25 +38,12 @@ class ErrorCode(StrEnum):
     RESOURCE_EXHAUSTED = "resource_exhausted"
 
 
-class ErrorDetail:
-    """Structured error detail information."""
+class ErrorDetail(BaseModel):
+    """Structured error detail information (used in MCP responses)."""
 
-    def __init__(
-        self,
-        code: ErrorCode,
-        message: str,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        """Initialize error detail.
-
-        Args:
-            code: Error code identifier.
-            message: Human-readable error message.
-            details: Optional additional context.
-        """
-        self.code = code
-        self.message = message
-        self.details = details or {}
+    code: str = Field(..., description="Error code identifier")
+    message: str = Field(..., description="Human-readable error message")
+    details: dict[str, Any] | None = Field(None, description="Additional error context")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation.
@@ -62,21 +51,7 @@ class ErrorDetail:
         Returns:
             dict: Dictionary containing error information.
         """
-        result: dict[str, Any] = {
-            "code": self.code,
-            "message": self.message,
-        }
-        if self.details:
-            result["details"] = self.details
-        return result
-
-    def __repr__(self) -> str:
-        """String representation of error detail.
-
-        Returns:
-            str: String representation.
-        """
-        return f"ErrorDetail(code={self.code}, message={self.message!r})"
+        return self.model_dump(exclude_none=True)
 
 
 class PgMcpError(Exception):
@@ -107,9 +82,9 @@ class PgMcpError(Exception):
         """Convert exception to ErrorDetail.
 
         Returns:
-            ErrorDetail: Structured error detail.
+            ErrorDetail: Structured error detail with string error code.
         """
-        return ErrorDetail(code=self.code, message=self.message, details=self.details)
+        return ErrorDetail(code=self.code.value, message=self.message, details=self.details or None)
 
     def __repr__(self) -> str:
         """String representation of error.

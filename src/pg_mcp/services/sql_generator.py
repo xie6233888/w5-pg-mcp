@@ -184,7 +184,7 @@ class SQLGenerator:
         matches = re.findall(code_block_pattern, content, re.DOTALL | re.IGNORECASE)
 
         if matches:
-            sql = matches[0].strip()
+            sql: str = matches[0].strip()
             # Remove trailing semicolon for consistency
             return sql.rstrip(";") + ";"
 
