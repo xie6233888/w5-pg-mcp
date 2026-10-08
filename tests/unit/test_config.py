@@ -271,9 +271,7 @@ class TestSecurityConfigNewFields:
         config = SecurityConfig()
         assert config.blocked_functions == ["pg_sleep", "lo_import"]
 
-    def test_list_fields_accept_json_arrays_from_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_list_fields_accept_json_arrays_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """JSON arrays remain the canonical form and keep working."""
         monkeypatch.setenv("SECURITY_BLOCKED_TABLES", '["a", "b"]')
         config = SecurityConfig()

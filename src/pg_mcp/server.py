@@ -211,10 +211,8 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
         if _schema_cache is not None:
             try:
                 import asyncio
-                await asyncio.wait_for(
-                    _schema_cache.stop_auto_refresh(),
-                    timeout=3.0
-                )
+
+                await asyncio.wait_for(_schema_cache.stop_auto_refresh(), timeout=3.0)
                 logger.info("Schema auto-refresh stopped")
             except TimeoutError:
                 logger.warning("Schema auto-refresh stop timed out")

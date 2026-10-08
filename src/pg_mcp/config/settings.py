@@ -143,9 +143,7 @@ class SecurityConfig(BaseSettings):
         default_factory=list,
         description="Column names that queries are not allowed to reference",
     )
-    allow_explain: bool = Field(
-        default=False, description="Whether EXPLAIN statements are allowed"
-    )
+    allow_explain: bool = Field(default=False, description="Whether EXPLAIN statements are allowed")
 
     @field_validator("blocked_functions", mode="before")
     @classmethod

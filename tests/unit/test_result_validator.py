@@ -94,31 +94,40 @@ class TestResultValidator:
         validator = _make_validator()
         response = MagicMock()
         response.choices = []
-        with patch.object(
-            validator.client.chat.completions,
-            "create",
-            new=AsyncMock(return_value=response),
-        ), pytest.raises(LLMError):
+        with (
+            patch.object(
+                validator.client.chat.completions,
+                "create",
+                new=AsyncMock(return_value=response),
+            ),
+            pytest.raises(LLMError),
+        ):
             await validator.validate(question="q", sql="SELECT 1", results=[], row_count=0)
 
     @pytest.mark.asyncio
     async def test_timeout_raises_llm_timeout(self) -> None:
         validator = _make_validator()
-        with patch.object(
-            validator.client.chat.completions,
-            "create",
-            new=AsyncMock(side_effect=TimeoutError("timed out")),
-        ), pytest.raises(LLMTimeoutError):
+        with (
+            patch.object(
+                validator.client.chat.completions,
+                "create",
+                new=AsyncMock(side_effect=TimeoutError("timed out")),
+            ),
+            pytest.raises(LLMTimeoutError),
+        ):
             await validator.validate(question="q", sql="SELECT 1", results=[], row_count=0)
 
     @pytest.mark.asyncio
     async def test_auth_failure_raises_llm_unavailable(self) -> None:
         validator = _make_validator()
-        with patch.object(
-            validator.client.chat.completions,
-            "create",
-            new=AsyncMock(side_effect=Exception("authentication failed: invalid api_key")),
-        ), pytest.raises(LLMUnavailableError):
+        with (
+            patch.object(
+                validator.client.chat.completions,
+                "create",
+                new=AsyncMock(side_effect=Exception("authentication failed: invalid api_key")),
+            ),
+            pytest.raises(LLMUnavailableError),
+        ):
             await validator.validate(question="q", sql="SELECT 1", results=[], row_count=0)
 
     @pytest.mark.asyncio

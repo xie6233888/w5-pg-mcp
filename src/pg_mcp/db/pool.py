@@ -105,9 +105,7 @@ async def close_pools(pools: dict[str, Pool], timeout: float = 10.0) -> None:  #
             logger.info(f"Connection pool for '{db_name}' closed gracefully")
         except TimeoutError:
             # Force termination if graceful close times out
-            logger.warning(
-                f"Graceful close timed out for '{db_name}', forcing termination"
-            )
+            logger.warning(f"Graceful close timed out for '{db_name}', forcing termination")
             pool.terminate()
             logger.info(f"Connection pool for '{db_name}' terminated")
         except Exception as e:
