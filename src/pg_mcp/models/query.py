@@ -9,6 +9,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+# ErrorDetail is defined in models.errors (Pydantic model, shared with the
+# exception hierarchy). Re-exported here for backward compatibility.
+from pg_mcp.models.errors import ErrorDetail as ErrorDetail
+
 
 class ReturnType(StrEnum):
     """Type of return value requested by the client."""
@@ -136,14 +140,6 @@ class QueryResult(BaseModel):
         return self.model_dump()
 
 
-class ErrorDetail(BaseModel):
-    """Detailed error information."""
-
-    code: str = Field(..., description="Error code identifier")
-    message: str = Field(..., description="Human-readable error message")
-    details: dict[str, Any] | None = Field(None, description="Additional error context")
-
-
 class QueryResponse(BaseModel):
     """Complete query response to client."""
 
@@ -210,11 +206,3 @@ class QueryResponse(BaseModel):
             if not success and v is None:
                 raise ValueError("Error must be present when success is False")
         return v
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert response to dictionary.
-
-        Returns:
-            dict: Dictionary representation of query response.
-        """
-        return self.model_dump(exclude_none=True)

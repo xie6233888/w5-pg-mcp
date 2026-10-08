@@ -82,6 +82,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short"
 markers = [
     "integration: marks tests as integration tests (require database and API key)",
+    "reads_dotenv: test deliberately loads a .env file; opts out of dotenv isolation",
 ]
 
 [tool.coverage.run]

@@ -5,6 +5,7 @@ defaults, and environment variable parsing.
 """
 
 import os
+import pathlib
 
 import pytest
 from pydantic import ValidationError
@@ -200,24 +201,82 @@ class TestValidationConfig:
         """Test default configuration values."""
         config = ValidationConfig()
         assert config.max_question_length == 10000
-        assert config.min_confidence_score == 70
+        assert config.confidence_threshold == 70
 
     def test_custom_values(self) -> None:
         """Test custom configuration values."""
         config = ValidationConfig(
             max_question_length=5000,
-            min_confidence_score=80,
+            confidence_threshold=80,
         )
         assert config.max_question_length == 5000
-        assert config.min_confidence_score == 80
+        assert config.confidence_threshold == 80
 
-    def test_invalid_confidence_score(self) -> None:
-        """Test invalid confidence score is rejected."""
+    def test_invalid_confidence_threshold(self) -> None:
+        """Test invalid confidence threshold is rejected."""
         with pytest.raises(ValidationError):
-            ValidationConfig(min_confidence_score=-1)
+            ValidationConfig(confidence_threshold=-1)
 
         with pytest.raises(ValidationError):
-            ValidationConfig(min_confidence_score=101)
+            ValidationConfig(confidence_threshold=101)
+
+
+class TestValidationConfigCleanup:
+    """ValidationConfig: min_confidence_score removed (duplicate of confidence_threshold)."""
+
+    def test_min_confidence_score_removed(self) -> None:
+        """The unused duplicate field must not exist."""
+        config = ValidationConfig()
+        assert not hasattr(config, "min_confidence_score")
+
+    def test_confidence_threshold_still_enforced_default(self) -> None:
+        config = ValidationConfig()
+        assert config.confidence_threshold == 70
+
+
+class TestSecurityConfigNewFields:
+    """SecurityConfig: blocked_tables / blocked_columns / allow_explain."""
+
+    def test_defaults_empty_and_false(self) -> None:
+        config = SecurityConfig()
+        assert config.blocked_tables == []
+        assert config.blocked_columns == []
+        assert config.allow_explain is False
+
+    def test_blocked_tables_from_env_csv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SECURITY_BLOCKED_TABLES", "secret_table, audit_log ,")
+        config = SecurityConfig()
+        assert config.blocked_tables == ["secret_table", "audit_log"]
+
+    def test_blocked_columns_from_env_csv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SECURITY_BLOCKED_COLUMNS", "password,ssn")
+        config = SecurityConfig()
+        assert config.blocked_columns == ["password", "ssn"]
+
+    def test_allow_explain_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SECURITY_ALLOW_EXPLAIN", "true")
+        config = SecurityConfig()
+        assert config.allow_explain is True
+
+    def test_blocked_tables_accept_list_directly(self) -> None:
+        config = SecurityConfig(blocked_tables=["t1"], blocked_columns=["c1"], allow_explain=True)
+        assert config.blocked_tables == ["t1"]
+        assert config.blocked_columns == ["c1"]
+        assert config.allow_explain is True
+
+    def test_blocked_functions_csv_from_env_regression(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CSV env values must not crash JSON-first parsing (pre-existing bug)."""
+        monkeypatch.setenv("SECURITY_BLOCKED_FUNCTIONS", "pg_sleep, lo_import ,")
+        config = SecurityConfig()
+        assert config.blocked_functions == ["pg_sleep", "lo_import"]
+
+    def test_list_fields_accept_json_arrays_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """JSON arrays remain the canonical form and keep working."""
+        monkeypatch.setenv("SECURITY_BLOCKED_TABLES", '["a", "b"]')
+        config = SecurityConfig()
+        assert config.blocked_tables == ["a", "b"]
 
 
 class TestCacheConfig:
@@ -420,3 +479,106 @@ class TestSettingsGlobalInstance:
         assert settings.openai.model == "gpt-4"
         assert settings.database.host == "env.host.com"
         assert settings.security.max_rows == 5000
+
+
+class TestMultiDatabaseSettings:
+    """Settings.databases list + all_databases property."""
+
+    @pytest.fixture(autouse=True)
+    def _openai_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Settings requires a non-empty OpenAI key; unrelated to these tests."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    def test_all_databases_primary_only_by_default(self) -> None:
+        settings = Settings(database=DatabaseConfig(name="main"))
+        assert [db.name for db in settings.all_databases] == ["main"]
+
+    def test_all_databases_includes_extra(self) -> None:
+        settings = Settings(
+            database=DatabaseConfig(name="main"),
+            databases=[DatabaseConfig(name="extra", host="remote")],
+        )
+        assert [db.name for db in settings.all_databases] == ["main", "extra"]
+
+    def test_databases_from_json_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATABASES", '[{"name": "db2", "host": "remote"}, {"name": "db3"}]')
+        settings = Settings(database=DatabaseConfig(name="main"))
+        assert [db.name for db in settings.databases] == ["db2", "db3"]
+        assert settings.databases[0].host == "remote"
+
+    def test_databases_malformed_json_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATABASES", "not-json")
+        with pytest.raises(Exception, match="databases"):
+            Settings(database=DatabaseConfig(name="main"))
+
+    def test_duplicate_names_between_primary_and_extra_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Duplicate database names"):
+            Settings(
+                database=DatabaseConfig(name="main"),
+                databases=[DatabaseConfig(name="main")],
+            )
+
+    def test_duplicate_names_within_extras_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Duplicate database names"):
+            Settings(
+                database=DatabaseConfig(name="main"),
+                databases=[DatabaseConfig(name="dup"), DatabaseConfig(name="dup")],
+            )
+
+
+class TestResilienceConfigNewFields:
+    """ResilienceConfig: rate limit knobs."""
+
+    def test_defaults(self) -> None:
+        config = ResilienceConfig()
+        assert config.max_concurrent_queries == 10
+        assert config.max_concurrent_llm_calls == 5
+        assert config.rate_limit_timeout == 60.0
+
+    def test_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RESILIENCE_MAX_CONCURRENT_QUERIES", "20")
+        monkeypatch.setenv("RESILIENCE_MAX_CONCURRENT_LLM_CALLS", "8")
+        monkeypatch.setenv("RESILIENCE_RATE_LIMIT_TIMEOUT", "30.0")
+        config = ResilienceConfig()
+        assert config.max_concurrent_queries == 20
+        assert config.max_concurrent_llm_calls == 8
+        assert config.rate_limit_timeout == 30.0
+
+
+@pytest.mark.reads_dotenv
+class TestDotenvFileIsHonoured:
+    """Regression: nested config sections must read the .env file too.
+
+    Nested sections are separate BaseSettings with their own model_config, so
+    the parent's env_file is not inherited unless each section declares it.
+    A silently ignored .env means documented security settings do nothing.
+    """
+
+    def test_nested_sections_read_env_file(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text(
+            "ENVIRONMENT=staging\n"
+            "OPENAI_API_KEY=sk-fromfile\n"
+            "DATABASE_HOST=filehost\n"
+            "SECURITY_BLOCKED_TABLES=users,secrets\n"
+            "OBSERVABILITY_LOG_LEVEL=WARNING\n",
+            encoding="utf-8",
+        )
+        for var in (
+            "ENVIRONMENT",
+            "OPENAI_API_KEY",
+            "DATABASE_HOST",
+            "SECURITY_BLOCKED_TABLES",
+            "OBSERVABILITY_LOG_LEVEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        settings = Settings()
+
+        assert settings.environment == "staging"
+        assert settings.openai.api_key.get_secret_value() == "sk-fromfile"
+        assert settings.database.host == "filehost"
+        assert settings.security.blocked_tables == ["users", "secrets"]
+        assert settings.observability.log_level == "WARNING"

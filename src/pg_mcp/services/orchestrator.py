@@ -5,8 +5,11 @@ of the query processing pipeline: SQL generation, validation, execution, and res
 validation. It implements retry logic, error handling, and request tracking.
 """
 
+import asyncio
 import logging
-import uuid
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from asyncpg import Pool
@@ -17,7 +20,10 @@ from pg_mcp.models.errors import (
     DatabaseError,
     ErrorCode,
     LLMError,
+    LLMTimeoutError,
+    LLMUnavailableError,
     PgMcpError,
+    RateLimitExceededError,
     SchemaLoadError,
     SecurityViolationError,
     SQLParseError,
@@ -30,13 +36,41 @@ from pg_mcp.models.query import (
     ReturnType,
     ValidationResult,
 )
+from pg_mcp.observability.metrics import MetricsCollector
+from pg_mcp.observability.metrics import metrics as default_metrics
+from pg_mcp.observability.tracing import (
+    clear_request_id,
+    generate_request_id,
+    set_request_id,
+)
 from pg_mcp.resilience.circuit_breaker import CircuitBreaker
+from pg_mcp.resilience.rate_limiter import MultiRateLimiter
+from pg_mcp.resilience.retry import is_transient_db_error, retry_async
 from pg_mcp.services.result_validator import ResultValidator
 from pg_mcp.services.sql_executor import SQLExecutor
 from pg_mcp.services.sql_generator import SQLGenerator
 from pg_mcp.services.sql_validator import SQLValidator
 
 logger = logging.getLogger(__name__)
+
+
+def _is_transient_llm_error(error: Exception) -> bool:
+    """Classify LLM errors worth retrying: timeouts and provider rate limits.
+
+    Authentication failures are permanent and are not retried.
+
+    Args:
+        error: The exception raised by the LLM call.
+
+    Returns:
+        bool: True if retrying could plausibly succeed.
+    """
+    if isinstance(error, LLMTimeoutError):
+        return True
+    if isinstance(error, LLMUnavailableError):
+        detail = error.details.get("error", "") if isinstance(error.details, dict) else ""
+        return "rate_limit" in str(detail).lower()
+    return False
 
 
 class QueryOrchestrator:
@@ -50,7 +84,7 @@ class QueryOrchestrator:
         >>> orchestrator = QueryOrchestrator(
         ...     sql_generator=generator,
         ...     sql_validator=validator,
-        ...     sql_executor=executor,
+        ...     sql_executors={"mydb": executor},
         ...     result_validator=result_validator,
         ...     schema_cache=cache,
         ...     pools={"mydb": pool},
@@ -67,33 +101,40 @@ class QueryOrchestrator:
         self,
         sql_generator: SQLGenerator,
         sql_validator: SQLValidator,
-        sql_executor: SQLExecutor,
+        sql_executors: dict[str, SQLExecutor],
         result_validator: ResultValidator,
         schema_cache: SchemaCache,
         pools: dict[str, Pool],
         resilience_config: ResilienceConfig,
         validation_config: ValidationConfig,
+        rate_limiter: MultiRateLimiter | None = None,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         """Initialize query orchestrator.
 
         Args:
             sql_generator: SQL generation service.
             sql_validator: SQL validation service.
-            sql_executor: SQL execution service.
+            sql_executors: Mapping from database name to its SQL executor, so a
+                request runs against the database it resolved to.
             result_validator: Result validation service.
             schema_cache: Schema cache instance.
             pools: Dictionary mapping database names to connection pools.
             resilience_config: Resilience configuration for retries and circuit breaker.
             validation_config: Validation configuration including thresholds.
+            rate_limiter: Optional concurrency limiter for LLM and DB operations.
+            metrics: Optional metrics collector; defaults to the global instance.
         """
         self.sql_generator = sql_generator
         self.sql_validator = sql_validator
-        self.sql_executor = sql_executor
+        self.sql_executors = sql_executors
         self.result_validator = result_validator
         self.schema_cache = schema_cache
         self.pools = pools
         self.resilience_config = resilience_config
         self.validation_config = validation_config
+        self.rate_limiter = rate_limiter
+        self.metrics = metrics if metrics is not None else default_metrics
 
         # Create circuit breaker for LLM calls
         self.circuit_breaker = CircuitBreaker(
@@ -126,14 +167,22 @@ class QueryOrchestrator:
             >>> if response.success:
             ...     print(f"Found {response.data.row_count} rows")
         """
-        # Generate request_id for full-chain tracing
-        request_id = str(uuid.uuid4())
+        # Generate request_id and publish it for full-chain tracing
+        request_id = generate_request_id()
+        set_request_id(request_id)
+        start = time.monotonic()
+        database_name: str | None = None
+        status = "success"
+
         logger.info(
             "Starting query execution",
             extra={"request_id": request_id, "question": request.question[:100]},
         )
 
         try:
+            # Step 0: Reject oversized questions before any LLM call
+            self._check_question_length(request.question)
+
             # Step 1: Resolve database name
             database_name = self._resolve_database(request.database)
             logger.debug(
@@ -191,11 +240,22 @@ class QueryOrchestrator:
                     tokens_used=tokens_used,
                 )
 
-            # Step 5: Execute SQL
+            # Step 5: Execute SQL on the resolved database's executor
+            executor = self._get_executor(database_name)
             logger.debug("Executing SQL", extra={"request_id": request_id})
             start_time = self._get_current_time_ms()
 
-            results, total_count = await self.sql_executor.execute(generated_sql)
+            async with self._rate_limited("query"):
+                db_start = time.monotonic()
+                results, total_count = await retry_async(
+                    lambda: executor.execute(generated_sql),
+                    max_retries=self.resilience_config.max_retries,
+                    retry_delay=self.resilience_config.retry_delay,
+                    backoff_factor=self.resilience_config.backoff_factor,
+                    retryable=is_transient_db_error,
+                    operation_name=f"SQL execution on '{database_name}'",
+                )
+            self.metrics.observe_db_query_duration(time.monotonic() - db_start)
 
             execution_time_ms = self._get_current_time_ms() - start_time
             logger.info(
@@ -236,6 +296,9 @@ class QueryOrchestrator:
 
         except PgMcpError as e:
             # Handle known application errors
+            status = "error"
+            if isinstance(e, (SecurityViolationError, SQLParseError)):
+                self.metrics.increment_sql_rejected(e.code.value)
             logger.warning(
                 "Query execution failed with known error",
                 extra={
@@ -259,6 +322,7 @@ class QueryOrchestrator:
             )
         except Exception as e:
             # Handle unexpected errors
+            status = "error"
             logger.exception(
                 "Query execution failed with unexpected error",
                 extra={"request_id": request_id},
@@ -276,6 +340,10 @@ class QueryOrchestrator:
                 confidence=0,
                 tokens_used=None,
             )
+        finally:
+            self.metrics.observe_query_duration(time.monotonic() - start)
+            self.metrics.increment_query_request(status, database_name or "unknown")
+            clear_request_id()
 
     def _resolve_database(self, database: str | None) -> str:
         """Resolve database name from request or auto-select.
@@ -323,6 +391,82 @@ class QueryOrchestrator:
             message="Multiple databases available, please specify which to query",
             details={"available_databases": available_dbs},
         )
+
+    def _get_executor(self, database_name: str) -> SQLExecutor:
+        """Get the SQL executor for a resolved database name.
+
+        Args:
+            database_name: Resolved database name.
+
+        Returns:
+            SQLExecutor: Executor bound to that database's pool.
+
+        Raises:
+            DatabaseError: If no executor exists for the name.
+        """
+        executor = self.sql_executors.get(database_name)
+        if executor is None:
+            raise DatabaseError(
+                message=f"No SQL executor configured for database '{database_name}'",
+                details={
+                    "database": database_name,
+                    "available_executors": sorted(self.sql_executors.keys()),
+                },
+            )
+        return executor
+
+    def _check_question_length(self, question: str) -> None:
+        """Reject questions exceeding the configured maximum length.
+
+        Args:
+            question: User's natural language question.
+
+        Raises:
+            PgMcpError: With code QUESTION_TOO_LONG if over the limit.
+        """
+        max_length = self.validation_config.max_question_length
+        if len(question) > max_length:
+            raise PgMcpError(
+                message=(
+                    f"Question length {len(question)} exceeds maximum of {max_length} characters"
+                ),
+                code=ErrorCode.QUESTION_TOO_LONG,
+                details={"question_length": len(question), "max_length": max_length},
+            )
+
+    @asynccontextmanager
+    async def _rate_limited(self, kind: str) -> AsyncIterator[None]:
+        """Run an operation under the shared rate limiter.
+
+        Args:
+            kind: "llm" or "query" -- selects the limiter bucket.
+
+        Yields:
+            None
+
+        Raises:
+            RateLimitExceededError: If no slot becomes available within
+                resilience_config.rate_limit_timeout seconds.
+        """
+        if self.rate_limiter is None:
+            yield
+            return
+        timeout = self.resilience_config.rate_limit_timeout
+        try:
+            if kind == "llm":
+                async with self.rate_limiter.for_llm(timeout=timeout):
+                    yield
+            else:
+                async with self.rate_limiter.for_queries(timeout=timeout):
+                    yield
+        except TimeoutError as e:
+            raise RateLimitExceededError(
+                message=f"Rate limit exceeded while waiting for a {kind} slot",
+                details={
+                    "kind": kind,
+                    "timeout_seconds": self.resilience_config.rate_limit_timeout,
+                },
+            ) from e
 
     async def _generate_sql_with_retry(
         self,
@@ -385,16 +529,19 @@ class QueryOrchestrator:
                     },
                 )
 
-                # Generate SQL
-                generated_sql = await self.sql_generator.generate(
-                    question=question,
-                    schema=schema,
-                    previous_attempt=previous_sql,
-                    error_feedback=error_feedback,
-                )
-
-                # Note: tokens_used would come from OpenAI response metadata if available
-                # For now, we don't extract it, but it can be added later
+                # Generate SQL (rate limited; latency and tokens metered)
+                async with self._rate_limited("llm"):
+                    llm_start = time.monotonic()
+                    generated_sql, tokens_used = await self.sql_generator.generate(
+                        question=question,
+                        schema=schema,
+                        previous_attempt=previous_sql,
+                        error_feedback=error_feedback,
+                    )
+                self.metrics.increment_llm_call("generate_sql")
+                self.metrics.observe_llm_latency("generate_sql", time.monotonic() - llm_start)
+                if tokens_used:
+                    self.metrics.increment_llm_tokens("generate_sql", tokens_used)
 
                 logger.debug(
                     "SQL generated",
@@ -406,7 +553,7 @@ class QueryOrchestrator:
 
                 # Validate SQL
                 try:
-                    self.sql_validator.validate_or_raise(generated_sql)
+                    validation_result = self.sql_validator.validate_with_result(generated_sql)
                 except (SecurityViolationError, SQLParseError) as validation_error:
                     if attempt < max_retries:
                         # Record as failure and retry with feedback
@@ -444,19 +591,34 @@ class QueryOrchestrator:
                     },
                 )
 
-                # Build validation result
-                validation_result = ValidationResult(
-                    is_valid=True,
-                    is_select=True,
-                    allows_data_modification=False,
-                    uses_blocked_functions=[],
-                    error_message=None,
-                )
-
                 return generated_sql, validation_result, tokens_used
 
-            except (LLMError, SecurityViolationError, SQLParseError):
-                # Re-raise known errors
+            except (
+                LLMError,
+                SecurityViolationError,
+                SQLParseError,
+                RateLimitExceededError,
+            ) as e:
+                if isinstance(e, RateLimitExceededError):
+                    # Limiter saturation is not an LLM fault: surface it as-is
+                    # and never charge it to the circuit breaker, or a load
+                    # spike would open the circuit and turn a busy server into
+                    # an outage.
+                    raise
+                if _is_transient_llm_error(e) and attempt < max_retries:
+                    delay = self.resilience_config.retry_delay * (
+                        self.resilience_config.backoff_factor**attempt
+                    )
+                    logger.warning(
+                        "Transient LLM error, retrying with backoff",
+                        extra={"request_id": request_id, "attempt": attempt + 1, "delay": delay},
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if isinstance(e, (SecurityViolationError, SQLParseError)):
+                    # Already recorded by the validation handler above.
+                    raise
+                self.circuit_breaker.record_failure()
                 raise
             except Exception as e:
                 # Unexpected error during generation
@@ -498,7 +660,8 @@ class QueryOrchestrator:
             request_id: Request ID for tracking.
 
         Returns:
-            int: Confidence score (0-100). Returns 100 if validation disabled/fails.
+            int: Confidence score (0-100). Returns 100 when validation is disabled by
+                configuration, and a neutral 50 when validation itself fails.
 
         Example:
             >>> confidence = await orchestrator._validate_results_safely(
@@ -525,6 +688,16 @@ class QueryOrchestrator:
                 row_count=row_count,
             )
 
+            if not validation_result.is_acceptable:
+                logger.warning(
+                    "Result confidence below configured threshold",
+                    extra={
+                        "request_id": request_id,
+                        "confidence": validation_result.confidence,
+                        "threshold": self.validation_config.confidence_threshold,
+                    },
+                )
+
             logger.info(
                 "Result validation completed",
                 extra={
@@ -539,13 +712,14 @@ class QueryOrchestrator:
         except Exception as e:
             # Log but don't fail the query
             logger.warning(
-                "Result validation failed, continuing with default confidence",
+                "Result validation failed, continuing with neutral confidence",
                 extra={
                     "request_id": request_id,
                     "error": str(e),
                 },
             )
-            return 100  # Default to high confidence if validation fails
+            # Neutral confidence: validation could not produce a signal
+            return 50
 
     @staticmethod
     def _get_current_time_ms() -> float:
@@ -554,6 +728,4 @@ class QueryOrchestrator:
         Returns:
             float: Current time in milliseconds since epoch.
         """
-        import time
-
         return time.time() * 1000

@@ -63,7 +63,7 @@ FastMCP server.py (lifespan 中初始化全部组件为模块级全局变量)
 关键约定：
 
 - **错误不穿透露 MCP 边界**：`query` tool 永不抛异常，所有错误以 `{"success": false, "error": {code, message, details}}` dict 返回。内部用 `models/errors.py` 的 `PgMcpError` 层次 + `ErrorCode` (StrEnum)。
-- **配置**：pydantic-settings 嵌套分组，环境变量前缀 `DATABASE_` / `OPENAI_` / `SECURITY_` / `CACHE_` / `RESILIENCE_` / `OBSERVABILITY_` / `VALIDATION_`，从 `.env` 读取。LLM 模型代码默认 `gpt-4o-mini`，用 `OPENAI_MODEL` 覆盖。`Settings` 有全局单例模式（`reset_settings()`），测试 conftest 每个 test 自动重置。
+- **配置**：pydantic-settings 嵌套分组，环境变量前缀 `DATABASE_` / `OPENAI_` / `SECURITY_` / `CACHE_` / `RESILIENCE_` / `OBSERVABILITY_` / `VALIDATION_`，从 `.env` 读取。主库用 `DATABASE_*`；附加库用 `DATABASES`（JSON 数组，元素字段同 `DATABASE_*`，库名全局唯一），`Settings.all_databases` 返回主库在前的完整列表，`QueryOrchestrator` 按请求解析出的库名选择对应 executor。LLM 模型代码默认 `gpt-4o-mini`，用 `OPENAI_MODEL` 覆盖。`Settings` 有全局单例模式（`reset_settings()`），测试 conftest 每个 test 自动重置。
 
 ## 安全模型（sql_validator.py，核心模块）
 

@@ -12,6 +12,7 @@ from sqlglot import exp
 
 from pg_mcp.config.settings import SecurityConfig
 from pg_mcp.models.errors import SecurityViolationError, SQLParseError
+from pg_mcp.models.query import ValidationResult
 
 
 class SQLValidator:
@@ -26,13 +27,16 @@ class SQLValidator:
     """
 
     # Allowed statement types at the top level (including set operations)
-    ALLOWED_STATEMENT_TYPES: ClassVar = {
-        exp.Select, exp.Union, exp.Intersect, exp.Except
-    }
+    ALLOWED_STATEMENT_TYPES: ClassVar = {exp.Select, exp.Union, exp.Intersect, exp.Except}
 
     # Allowed top-level expressions (including CTEs)
     ALLOWED_TOP_LEVEL: ClassVar = {
-        exp.Select, exp.Union, exp.Intersect, exp.Except, exp.With, exp.Subquery
+        exp.Select,
+        exp.Union,
+        exp.Intersect,
+        exp.Except,
+        exp.With,
+        exp.Subquery,
     }
 
     # Forbidden statement types
@@ -114,11 +118,56 @@ class SQLValidator:
         except (SecurityViolationError, SQLParseError) as e:
             return (False, str(e))
 
+    @staticmethod
+    def _valid_result() -> ValidationResult:
+        """Build the ValidationResult for SQL that passed every check."""
+        return ValidationResult(
+            is_valid=True,
+            is_select=True,
+            allows_data_modification=False,
+            uses_blocked_functions=[],
+            error_message=None,
+        )
+
     def validate_or_raise(self, sql: str) -> None:
         """Validate SQL query and raise exception on violation.
 
         Args:
             sql: SQL query string to validate.
+
+        Raises:
+            SQLParseError: If SQL cannot be parsed.
+            SecurityViolationError: If SQL violates security constraints.
+        """
+        self._analyze(sql)
+
+    def validate_with_result(self, sql: str) -> ValidationResult:
+        """Validate SQL and return a detailed validation result.
+
+        Behavior on failure is identical to validate_or_raise; on success the
+        returned model reflects the checks actually performed instead of a
+        hardcoded "valid" result.
+
+        Args:
+            sql: SQL query string to validate.
+
+        Returns:
+            ValidationResult: Populated validation outcome.
+
+        Raises:
+            SQLParseError: If SQL cannot be parsed.
+            SecurityViolationError: If SQL violates security constraints.
+        """
+        return self._analyze(sql)
+
+    def _analyze(self, sql: str) -> ValidationResult:
+        """Run every security check and return the validation outcome.
+
+        Args:
+            sql: SQL query string to validate.
+
+        Returns:
+            ValidationResult: Populated outcome for SQL that passed all checks.
 
         Raises:
             SQLParseError: If SQL cannot be parsed.
@@ -160,7 +209,7 @@ class SQLValidator:
                 # sqlglot 28.5.0 cannot parse EXPLAIN syntax reliably (falls back to Command),
                 # so we don't attempt to validate the inner query string to avoid false positives.
                 # Even "EXPLAIN DELETE" is safe as it won't actually delete data.
-                return None
+                return self._valid_result()
             else:
                 # Other commands are not allowed
                 raise SecurityViolationError(
@@ -192,6 +241,8 @@ class SQLValidator:
 
         if error := self._check_subquery_safety(statement):
             raise SecurityViolationError(error)
+
+        return self._valid_result()
 
     def _check_statement_type(self, statement: exp.Expression) -> str | None:
         """Check if statement type is allowed.
@@ -266,12 +317,21 @@ class SQLValidator:
         if not self.blocked_columns:
             return None
 
+        # A qualified entry like "accounts.ssn" names a column, not a scope we
+        # can resolve: without a catalog we cannot tell which table an
+        # unqualified or aliased `ssn` belongs to. Blocking the bare name
+        # everywhere is the fail-safe reading -- it over-blocks rather than
+        # silently protecting nothing.
+        blocked_bare_names = {
+            entry.rsplit(".", 1)[1] for entry in self.blocked_columns if "." in entry
+        }
+
         # Find all column references
         for column in statement.find_all(exp.Column):
             column_name = column.name.lower() if column.name else ""
 
-            # Check for exact match
-            if column_name in self.blocked_columns:
+            # Check for exact match or a bare name implied by a qualified entry
+            if column_name in self.blocked_columns or column_name in blocked_bare_names:
                 return f"Access to column '{column_name}' is not allowed"
 
             # Check for qualified column names (table.column)

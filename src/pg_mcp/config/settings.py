@@ -5,16 +5,68 @@ and type safety. Configuration is loaded from environment variables with
 sensible defaults.
 """
 
-from typing import Literal
+import json
+from typing import Any, Literal, get_origin
 
-from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+
+def _is_sequence_field(field: FieldInfo) -> bool:
+    """Check whether a field's annotation is a list/set/tuple type."""
+    return get_origin(field.annotation) in (list, set, tuple)
+
+
+class _CsvOrJsonMixin:
+    """Accept comma-separated lists as well as JSON arrays for sequence fields.
+
+    pydantic-settings JSON-decodes list fields and raises SettingsError on
+    anything else, which would make the documented CSV style
+    (``SECURITY_BLOCKED_TABLES=a,b``) crash at startup. This handles sequence
+    fields itself: a JSON array when the value looks like one, comma-split
+    otherwise. Mixed into both the env-var and the dotenv source, so the two
+    paths behave identically.
+    """
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: FieldInfo,
+        value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        if isinstance(value, str) and _is_sequence_field(field):
+            text = value.strip()
+            if text.startswith("["):
+                return json.loads(text)
+            return [item.strip() for item in text.split(",") if item.strip()]
+        # Cooperative mixin: the concrete source class supplies this method.
+        return super().prepare_field_value(  # type: ignore[misc]
+            field_name, field, value, value_is_complex
+        )
+
+
+class _CsvOrJsonEnvSource(_CsvOrJsonMixin, EnvSettingsSource):
+    """CSV-or-JSON handling for values read from environment variables."""
+
+
+class _CsvOrJsonDotEnvSource(_CsvOrJsonMixin, DotEnvSettingsSource):
+    """CSV-or-JSON handling for values read from an env file."""
 
 
 class DatabaseConfig(BaseSettings):
     """PostgreSQL database connection configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="DATABASE_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="DATABASE_"
+    )
 
     host: str = Field(default="localhost", description="Database host")
     port: int = Field(default=5432, ge=1, le=65535, description="Database port")
@@ -46,7 +98,9 @@ class DatabaseConfig(BaseSettings):
 class OpenAIConfig(BaseSettings):
     """OpenAI API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="OPENAI_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="OPENAI_"
+    )
 
     api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
     model: str = Field(default="gpt-4o-mini", description="Model to use for SQL generation")
@@ -73,7 +127,9 @@ class OpenAIConfig(BaseSettings):
 class SecurityConfig(BaseSettings):
     """Security and access control configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="SECURITY_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="SECURITY_"
+    )
 
     allow_write_operations: bool = Field(
         default=False, description="Allow write operations (INSERT, UPDATE, DELETE)"
@@ -98,6 +154,15 @@ class SecurityConfig(BaseSettings):
     safe_search_path: str = Field(
         default="public", description="Safe search_path to set during query execution"
     )
+    blocked_tables: list[str] = Field(
+        default_factory=list,
+        description="Table names that queries are not allowed to reference",
+    )
+    blocked_columns: list[str] = Field(
+        default_factory=list,
+        description="Column names that queries are not allowed to reference",
+    )
+    allow_explain: bool = Field(default=False, description="Whether EXPLAIN statements are allowed")
 
     @field_validator("blocked_functions", mode="before")
     @classmethod
@@ -107,17 +172,41 @@ class SecurityConfig(BaseSettings):
             return [f.strip() for f in v.split(",") if f.strip()]
         return v
 
+    @field_validator("blocked_tables", "blocked_columns", mode="before")
+    @classmethod
+    def parse_string_list(cls, v: str | list[str]) -> list[str]:
+        """Parse comma-separated string or list."""
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Use CSV-tolerant sources so list fields accept comma strings."""
+        return (
+            init_settings,
+            _CsvOrJsonEnvSource(settings_cls),
+            _CsvOrJsonDotEnvSource(settings_cls),
+            file_secret_settings,
+        )
+
 
 class ValidationConfig(BaseSettings):
     """Query validation configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="VALIDATION_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="VALIDATION_"
+    )
 
     max_question_length: int = Field(
         default=10000, ge=1, le=50000, description="Maximum question length in characters"
-    )
-    min_confidence_score: int = Field(
-        default=70, ge=0, le=100, description="Minimum confidence score (0-100)"
     )
 
     # Result validation settings
@@ -136,7 +225,9 @@ class ValidationConfig(BaseSettings):
 class CacheConfig(BaseSettings):
     """Schema cache configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="CACHE_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="CACHE_"
+    )
 
     schema_ttl: int = Field(
         default=3600, ge=60, le=86400, description="Schema cache TTL in seconds"
@@ -148,7 +239,9 @@ class CacheConfig(BaseSettings):
 class ResilienceConfig(BaseSettings):
     """Resilience and fault tolerance configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="RESILIENCE_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="RESILIENCE_"
+    )
 
     max_retries: int = Field(default=3, ge=0, le=10, description="Maximum retry attempts")
     retry_delay: float = Field(
@@ -163,12 +256,26 @@ class ResilienceConfig(BaseSettings):
     circuit_breaker_timeout: float = Field(
         default=60.0, ge=10.0, le=300.0, description="Circuit breaker timeout in seconds"
     )
+    max_concurrent_queries: int = Field(
+        default=10, ge=1, le=1000, description="Maximum concurrent database queries"
+    )
+    max_concurrent_llm_calls: int = Field(
+        default=5, ge=1, le=1000, description="Maximum concurrent LLM API calls"
+    )
+    rate_limit_timeout: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=600.0,
+        description="Max seconds to wait for a rate limiter slot before failing",
+    )
 
 
 class ObservabilityConfig(BaseSettings):
     """Observability and monitoring configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="OBSERVABILITY_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="OBSERVABILITY_"
+    )
 
     metrics_enabled: bool = Field(default=True, description="Enable Prometheus metrics")
     metrics_port: int = Field(
@@ -177,7 +284,9 @@ class ObservabilityConfig(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Logging level"
     )
-    log_format: Literal["json", "text"] = Field(default="text", description="Log format")
+    log_format: Literal["json", "text"] = Field(
+        default="json", description="Log format (json for production, text for local reading)"
+    )
 
 
 class Settings(BaseSettings):
@@ -196,12 +305,33 @@ class Settings(BaseSettings):
 
     # Nested configurations
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    databases: list[DatabaseConfig] = Field(
+        default_factory=list,
+        description=(
+            "Additional databases; configured via the DATABASES env var as a JSON array "
+            '(e.g. DATABASES=\'[{"name": "db2", "host": "remote"}]\')'
+        ),
+    )
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+
+    @property
+    def all_databases(self) -> list[DatabaseConfig]:
+        """Primary database plus any additional databases (primary first)."""
+        return [self.database, *self.databases]
+
+    @model_validator(mode="after")
+    def validate_database_names_unique(self) -> "Settings":
+        """Ensure all configured database names are unique."""
+        names = [db.name for db in self.all_databases]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"Duplicate database names configured: {duplicates}")
+        return self
 
     @property
     def is_production(self) -> bool:

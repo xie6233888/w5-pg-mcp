@@ -5,7 +5,7 @@ and behavior.
 """
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from pg_mcp.models.errors import (
     DatabaseError,
@@ -375,24 +375,24 @@ class TestErrorModels:
     """Tests for error models."""
 
     def test_error_detail(self) -> None:
-        """Test ErrorDetail creation."""
+        """Test ErrorDetail creation (Pydantic, string codes)."""
         detail = ErrorDetail(
-            code=ErrorCode.SQL_PARSE_ERROR,
+            code=ErrorCode.SQL_PARSE_ERROR.value,
             message="Invalid syntax",
             details={"position": 10},
         )
-        assert detail.code == ErrorCode.SQL_PARSE_ERROR
+        assert detail.code == "sql_parse_error"
         assert detail.message == "Invalid syntax"
         assert detail.details["position"] == 10
 
     def test_error_detail_to_dict(self) -> None:
         """Test ErrorDetail serialization."""
         detail = ErrorDetail(
-            code=ErrorCode.DATABASE_ERROR,
+            code=ErrorCode.DATABASE_ERROR.value,
             message="Connection failed",
         )
         d = detail.to_dict()
-        assert d["code"] == ErrorCode.DATABASE_ERROR
+        assert d["code"] == "database_error"
         assert d["message"] == "Connection failed"
 
     def test_base_exception(self) -> None:
@@ -434,12 +434,32 @@ class TestErrorModels:
         assert err.code == ErrorCode.LLM_UNAVAILABLE
 
     def test_error_to_detail(self) -> None:
-        """Test exception to ErrorDetail conversion."""
+        """Test exception to ErrorDetail conversion returns Pydantic model with string code."""
         err = SecurityViolationError(
             message="Blocked function",
             details={"function": "pg_sleep"},
         )
         detail = err.to_error_detail()
-        assert detail.code == ErrorCode.SECURITY_VIOLATION
+        assert isinstance(detail, BaseModel)
+        assert detail.code == "security_violation"
         assert detail.message == "Blocked function"
-        assert detail.details["function"] == "pg_sleep"
+        assert detail.details == {"function": "pg_sleep"}
+
+
+class TestQueryResponseToDict:
+    """Tests for QueryResponse.to_dict dedup and tokens_used guarantee."""
+
+    def test_to_dict_always_includes_tokens_used(self) -> None:
+        """tokens_used=None must serialize as 0, never be dropped."""
+        response = QueryResponse(success=True, generated_sql="SELECT 1", confidence=100)
+        d = response.to_dict()
+        assert d["tokens_used"] == 0
+
+    def test_to_dict_keeps_none_fields(self) -> None:
+        """exclude_none=False: data/error/validation keys always present."""
+        response = QueryResponse(success=True, generated_sql="SELECT 1", confidence=100)
+        d = response.to_dict()
+        assert "data" in d
+        assert "error" in d
+        assert "validation" in d
+        assert d["data"] is None

@@ -659,3 +659,70 @@ class TestSubqueryWithForbiddenOperations:
         is_valid, error = validator.validate(sql)
         assert is_valid
         assert error is None
+
+
+class TestValidateWithResult:
+    """Tests for validate_with_result (detailed ValidationResult output)."""
+
+    @pytest.fixture
+    def validator(self) -> SQLValidator:
+        """Create a basic validator with default security config."""
+        return SQLValidator(config=SecurityConfig())
+
+    def test_valid_select_returns_populated_result(self, validator: SQLValidator) -> None:
+        result = validator.validate_with_result("SELECT id, name FROM users")
+        assert result.is_valid is True
+        assert result.is_select is True
+        assert result.allows_data_modification is False
+        assert result.uses_blocked_functions == []
+        assert result.error_message is None
+        assert result.is_safe is True
+
+    def test_cte_query_is_select(self, validator: SQLValidator) -> None:
+        result = validator.validate_with_result("WITH t AS (SELECT 1 AS x) SELECT x FROM t")
+        assert result.is_valid is True
+        assert result.is_select is True
+
+    def test_blocked_function_raises(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError, match="pg_sleep"):
+            validator.validate_with_result("SELECT pg_sleep(10)")
+
+    def test_write_statement_raises(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_with_result("DELETE FROM users")
+
+    def test_unparseable_sql_raises_parse_error(self, validator: SQLValidator) -> None:
+        with pytest.raises(SQLParseError):
+            validator.validate_with_result("SELEC FROM")
+
+    def test_empty_sql_raises_parse_error(self, validator: SQLValidator) -> None:
+        with pytest.raises(SQLParseError):
+            validator.validate_with_result("   ")
+
+
+class TestBlockedColumnsQualifiedForm:
+    """A qualified entry must not be bypassable by renaming the reference.
+
+    `blocked_columns=["accounts.ssn"]` cannot resolve which table an
+    unqualified or aliased `ssn` belongs to without a catalog, so it blocks
+    the column name outright (fail-safe over-approximation).
+    """
+
+    @pytest.fixture
+    def validator(self) -> SQLValidator:
+        return SQLValidator(config=SecurityConfig(), blocked_columns=["accounts.ssn"])
+
+    def test_blocks_qualified_reference(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_or_raise("SELECT accounts.ssn FROM accounts")
+
+    def test_blocks_bare_reference(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_or_raise("SELECT ssn FROM accounts")
+
+    def test_blocks_aliased_reference(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_or_raise("SELECT a.ssn FROM accounts a")
+
+    def test_unrelated_column_still_allowed(self, validator: SQLValidator) -> None:
+        validator.validate_or_raise("SELECT id, name FROM accounts")

@@ -257,8 +257,12 @@ def configure_logging(
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Create console handler
-    handler = logging.StreamHandler(sys.stdout)
+    # Create console handler writing to stderr.
+    #
+    # stdout is reserved for the MCP JSON-RPC stream: a stdio server that logs to
+    # stdout interleaves its log lines with protocol frames and the client fails
+    # to parse them ("Invalid JSON: trailing characters").
+    handler = logging.StreamHandler(sys.stderr)
 
     # Set formatter
     formatter: logging.Formatter
