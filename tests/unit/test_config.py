@@ -545,6 +545,7 @@ class TestResilienceConfigNewFields:
         assert config.rate_limit_timeout == 30.0
 
 
+@pytest.mark.reads_dotenv
 class TestDotenvFileIsHonoured:
     """Regression: nested config sections must read the .env file too.
 
