@@ -411,15 +411,12 @@ class QueryOrchestrator:
                 )
 
                 # Generate SQL
-                generated_sql = await self.sql_generator.generate(
+                generated_sql, tokens_used = await self.sql_generator.generate(
                     question=question,
                     schema=schema,
                     previous_attempt=previous_sql,
                     error_feedback=error_feedback,
                 )
-
-                # Note: tokens_used would come from OpenAI response metadata if available
-                # For now, we don't extract it, but it can be added later
 
                 logger.debug(
                     "SQL generated",

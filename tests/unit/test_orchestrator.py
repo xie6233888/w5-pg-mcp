@@ -160,7 +160,7 @@ class TestSQLGenerationWithRetry:
         """Test successful SQL generation on first attempt."""
         # Setup mocks
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "SELECT * FROM users;"
+        mock_generator.generate.return_value = ("SELECT * FROM users;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.return_value = _valid_validation()
@@ -198,8 +198,8 @@ class TestSQLGenerationWithRetry:
         # Setup mocks - first attempt fails validation, second succeeds
         mock_generator = AsyncMock()
         mock_generator.generate.side_effect = [
-            "SELECT * FROM user;",  # First attempt (wrong table name)
-            "SELECT * FROM users;",  # Second attempt (correct)
+            ("SELECT * FROM user;", 10),  # First attempt (wrong table name)
+            ("SELECT * FROM users;", 12),  # Second attempt (correct)
         ]
 
         mock_validator = MagicMock()
@@ -243,7 +243,7 @@ class TestSQLGenerationWithRetry:
         """Test failure after exhausting all retries."""
         # Setup mocks - all attempts fail validation
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "DELETE FROM users;"
+        mock_generator.generate.return_value = ("DELETE FROM users;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.side_effect = SecurityViolationError(
@@ -458,7 +458,7 @@ class TestExecuteQueryFlow:
         """Test executing query with return_type=SQL."""
         # Setup mocks
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "SELECT * FROM users;"
+        mock_generator.generate.return_value = ("SELECT * FROM users;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.return_value = _valid_validation()
@@ -498,7 +498,7 @@ class TestExecuteQueryFlow:
         """Test executing query with return_type=RESULT."""
         # Setup mocks
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "SELECT id, name FROM users;"
+        mock_generator.generate.return_value = ("SELECT id, name FROM users;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.return_value = _valid_validation()
@@ -567,7 +567,7 @@ class TestExecuteQueryFlow:
         mock_cache.load = AsyncMock(return_value=mock_schema)
 
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "SELECT 1;"
+        mock_generator.generate.return_value = ("SELECT 1;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.return_value = _valid_validation()
@@ -644,7 +644,7 @@ class TestExecuteQueryFlow:
         mock_cache.get.return_value = mock_schema
 
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "DELETE FROM users;"
+        mock_generator.generate.return_value = ("DELETE FROM users;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.side_effect = SecurityViolationError(
@@ -684,7 +684,7 @@ class TestExecuteQueryFlow:
         mock_cache.get.return_value = mock_schema
 
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "SELECT * FROM users;"
+        mock_generator.generate.return_value = ("SELECT * FROM users;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.return_value = _valid_validation()
@@ -757,7 +757,7 @@ class TestExecuteQueryFlow:
         mock_cache.get.return_value = mock_schema
 
         mock_generator = AsyncMock()
-        mock_generator.generate.return_value = "SELECT 1;"
+        mock_generator.generate.return_value = ("SELECT 1;", 42)
 
         mock_validator = MagicMock()
         mock_validator.validate_with_result.return_value = _valid_validation()
@@ -797,7 +797,7 @@ class TestExecutorSelection:
         exec_a.execute.return_value = ([{"n": 1}], 1)
         exec_b.execute.return_value = ([{"m": 2}], 1)
         gen = AsyncMock()
-        gen.generate.return_value = "SELECT 1;"
+        gen.generate.return_value = ("SELECT 1;", 42)
         val = MagicMock()
         val.validate_with_result.return_value = _valid_validation()
         rv = AsyncMock()
@@ -825,7 +825,7 @@ class TestExecutorSelection:
     async def test_missing_executor_raises_clean_error(self) -> None:
         """Executor dict missing a pool name must yield DatabaseError, not KeyError."""
         gen = AsyncMock()
-        gen.generate.return_value = "SELECT 1;"
+        gen.generate.return_value = ("SELECT 1;", 42)
         val = MagicMock()
         val.validate_with_result.return_value = _valid_validation()
         cache = MagicMock()
