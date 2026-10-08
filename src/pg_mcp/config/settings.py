@@ -5,10 +5,47 @@ and type safety. Configuration is loaded from environment variables with
 sensible defaults.
 """
 
-from typing import Literal
+import json
+from typing import Any, Literal, get_origin
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+
+def _is_sequence_field(field: FieldInfo) -> bool:
+    """Check whether a field's annotation is a list/set/tuple type."""
+    return get_origin(field.annotation) in (list, set, tuple)
+
+
+class _CsvOrJsonEnvSource(EnvSettingsSource):
+    """Env source that accepts comma-separated lists as well as JSON arrays.
+
+    pydantic-settings JSON-decodes list fields from environment variables and
+    raises SettingsError on anything else, which would make the documented CSV
+    style (``SECURITY_BLOCKED_TABLES=a,b``) crash at startup. This source
+    handles sequence fields itself: JSON array when the value looks like one,
+    comma-split otherwise.
+    """
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: FieldInfo,
+        value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        if isinstance(value, str) and _is_sequence_field(field):
+            text = value.strip()
+            if text.startswith("["):
+                return json.loads(text)
+            return [item.strip() for item in text.split(",") if item.strip()]
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
 
 
 class DatabaseConfig(BaseSettings):
@@ -125,6 +162,23 @@ class SecurityConfig(BaseSettings):
         if isinstance(v, str):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Use a CSV-tolerant env source so list fields accept comma strings."""
+        return (
+            init_settings,
+            _CsvOrJsonEnvSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
 
 class ValidationConfig(BaseSettings):

@@ -263,6 +263,22 @@ class TestSecurityConfigNewFields:
         assert config.blocked_columns == ["c1"]
         assert config.allow_explain is True
 
+    def test_blocked_functions_csv_from_env_regression(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CSV env values must not crash JSON-first parsing (pre-existing bug)."""
+        monkeypatch.setenv("SECURITY_BLOCKED_FUNCTIONS", "pg_sleep, lo_import ,")
+        config = SecurityConfig()
+        assert config.blocked_functions == ["pg_sleep", "lo_import"]
+
+    def test_list_fields_accept_json_arrays_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """JSON arrays remain the canonical form and keep working."""
+        monkeypatch.setenv("SECURITY_BLOCKED_TABLES", '["a", "b"]')
+        config = SecurityConfig()
+        assert config.blocked_tables == ["a", "b"]
+
 
 class TestCacheConfig:
     """Tests for CacheConfig."""
