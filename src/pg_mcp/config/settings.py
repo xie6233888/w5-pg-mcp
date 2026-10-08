@@ -12,6 +12,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
+    DotEnvSettingsSource,
     EnvSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
@@ -23,14 +24,15 @@ def _is_sequence_field(field: FieldInfo) -> bool:
     return get_origin(field.annotation) in (list, set, tuple)
 
 
-class _CsvOrJsonEnvSource(EnvSettingsSource):
-    """Env source that accepts comma-separated lists as well as JSON arrays.
+class _CsvOrJsonMixin:
+    """Accept comma-separated lists as well as JSON arrays for sequence fields.
 
-    pydantic-settings JSON-decodes list fields from environment variables and
-    raises SettingsError on anything else, which would make the documented CSV
-    style (``SECURITY_BLOCKED_TABLES=a,b``) crash at startup. This source
-    handles sequence fields itself: JSON array when the value looks like one,
-    comma-split otherwise.
+    pydantic-settings JSON-decodes list fields and raises SettingsError on
+    anything else, which would make the documented CSV style
+    (``SECURITY_BLOCKED_TABLES=a,b``) crash at startup. This handles sequence
+    fields itself: a JSON array when the value looks like one, comma-split
+    otherwise. Mixed into both the env-var and the dotenv source, so the two
+    paths behave identically.
     """
 
     def prepare_field_value(
@@ -45,13 +47,26 @@ class _CsvOrJsonEnvSource(EnvSettingsSource):
             if text.startswith("["):
                 return json.loads(text)
             return [item.strip() for item in text.split(",") if item.strip()]
-        return super().prepare_field_value(field_name, field, value, value_is_complex)
+        # Cooperative mixin: the concrete source class supplies this method.
+        return super().prepare_field_value(  # type: ignore[misc]
+            field_name, field, value, value_is_complex
+        )
+
+
+class _CsvOrJsonEnvSource(_CsvOrJsonMixin, EnvSettingsSource):
+    """CSV-or-JSON handling for values read from environment variables."""
+
+
+class _CsvOrJsonDotEnvSource(_CsvOrJsonMixin, DotEnvSettingsSource):
+    """CSV-or-JSON handling for values read from an env file."""
 
 
 class DatabaseConfig(BaseSettings):
     """PostgreSQL database connection configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="DATABASE_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="DATABASE_"
+    )
 
     host: str = Field(default="localhost", description="Database host")
     port: int = Field(default=5432, ge=1, le=65535, description="Database port")
@@ -83,7 +98,9 @@ class DatabaseConfig(BaseSettings):
 class OpenAIConfig(BaseSettings):
     """OpenAI API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="OPENAI_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="OPENAI_"
+    )
 
     api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
     model: str = Field(default="gpt-4o-mini", description="Model to use for SQL generation")
@@ -110,7 +127,9 @@ class OpenAIConfig(BaseSettings):
 class SecurityConfig(BaseSettings):
     """Security and access control configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="SECURITY_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="SECURITY_"
+    )
 
     allow_write_operations: bool = Field(
         default=False, description="Allow write operations (INSERT, UPDATE, DELETE)"
@@ -170,11 +189,11 @@ class SecurityConfig(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Use a CSV-tolerant env source so list fields accept comma strings."""
+        """Use CSV-tolerant sources so list fields accept comma strings."""
         return (
             init_settings,
             _CsvOrJsonEnvSource(settings_cls),
-            dotenv_settings,
+            _CsvOrJsonDotEnvSource(settings_cls),
             file_secret_settings,
         )
 
@@ -182,7 +201,9 @@ class SecurityConfig(BaseSettings):
 class ValidationConfig(BaseSettings):
     """Query validation configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="VALIDATION_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="VALIDATION_"
+    )
 
     max_question_length: int = Field(
         default=10000, ge=1, le=50000, description="Maximum question length in characters"
@@ -204,7 +225,9 @@ class ValidationConfig(BaseSettings):
 class CacheConfig(BaseSettings):
     """Schema cache configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="CACHE_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="CACHE_"
+    )
 
     schema_ttl: int = Field(
         default=3600, ge=60, le=86400, description="Schema cache TTL in seconds"
@@ -216,7 +239,9 @@ class CacheConfig(BaseSettings):
 class ResilienceConfig(BaseSettings):
     """Resilience and fault tolerance configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="RESILIENCE_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="RESILIENCE_"
+    )
 
     max_retries: int = Field(default=3, ge=0, le=10, description="Maximum retry attempts")
     retry_delay: float = Field(
@@ -248,7 +273,9 @@ class ResilienceConfig(BaseSettings):
 class ObservabilityConfig(BaseSettings):
     """Observability and monitoring configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="OBSERVABILITY_")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="OBSERVABILITY_"
+    )
 
     metrics_enabled: bool = Field(default=True, description="Enable Prometheus metrics")
     metrics_port: int = Field(
@@ -257,7 +284,9 @@ class ObservabilityConfig(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Logging level"
     )
-    log_format: Literal["json", "text"] = Field(default="text", description="Log format")
+    log_format: Literal["json", "text"] = Field(
+        default="json", description="Log format (json for production, text for local reading)"
+    )
 
 
 class Settings(BaseSettings):

@@ -698,3 +698,31 @@ class TestValidateWithResult:
     def test_empty_sql_raises_parse_error(self, validator: SQLValidator) -> None:
         with pytest.raises(SQLParseError):
             validator.validate_with_result("   ")
+
+
+class TestBlockedColumnsQualifiedForm:
+    """A qualified entry must not be bypassable by renaming the reference.
+
+    `blocked_columns=["accounts.ssn"]` cannot resolve which table an
+    unqualified or aliased `ssn` belongs to without a catalog, so it blocks
+    the column name outright (fail-safe over-approximation).
+    """
+
+    @pytest.fixture
+    def validator(self) -> SQLValidator:
+        return SQLValidator(config=SecurityConfig(), blocked_columns=["accounts.ssn"])
+
+    def test_blocks_qualified_reference(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_or_raise("SELECT accounts.ssn FROM accounts")
+
+    def test_blocks_bare_reference(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_or_raise("SELECT ssn FROM accounts")
+
+    def test_blocks_aliased_reference(self, validator: SQLValidator) -> None:
+        with pytest.raises(SecurityViolationError):
+            validator.validate_or_raise("SELECT a.ssn FROM accounts a")
+
+    def test_unrelated_column_still_allowed(self, validator: SQLValidator) -> None:
+        validator.validate_or_raise("SELECT id, name FROM accounts")

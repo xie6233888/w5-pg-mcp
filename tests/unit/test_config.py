@@ -5,6 +5,7 @@ defaults, and environment variable parsing.
 """
 
 import os
+import pathlib
 
 import pytest
 from pydantic import ValidationError
@@ -350,7 +351,7 @@ class TestObservabilityConfig:
         # 生产环境应该通过环境变量显式设置
         assert config.metrics_port == 9090
         assert config.log_level == "INFO"
-        assert config.log_format == "text"
+        assert config.log_format == "json"
 
     def test_custom_values(self) -> None:
         """Test custom configuration values."""
@@ -542,3 +543,41 @@ class TestResilienceConfigNewFields:
         assert config.max_concurrent_queries == 20
         assert config.max_concurrent_llm_calls == 8
         assert config.rate_limit_timeout == 30.0
+
+
+class TestDotenvFileIsHonoured:
+    """Regression: nested config sections must read the .env file too.
+
+    Nested sections are separate BaseSettings with their own model_config, so
+    the parent's env_file is not inherited unless each section declares it.
+    A silently ignored .env means documented security settings do nothing.
+    """
+
+    def test_nested_sections_read_env_file(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".env").write_text(
+            "ENVIRONMENT=staging\n"
+            "OPENAI_API_KEY=sk-fromfile\n"
+            "DATABASE_HOST=filehost\n"
+            "SECURITY_BLOCKED_TABLES=users,secrets\n"
+            "OBSERVABILITY_LOG_LEVEL=WARNING\n",
+            encoding="utf-8",
+        )
+        for var in (
+            "ENVIRONMENT",
+            "OPENAI_API_KEY",
+            "DATABASE_HOST",
+            "SECURITY_BLOCKED_TABLES",
+            "OBSERVABILITY_LOG_LEVEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        settings = Settings()
+
+        assert settings.environment == "staging"
+        assert settings.openai.api_key.get_secret_value() == "sk-fromfile"
+        assert settings.database.host == "filehost"
+        assert settings.security.blocked_tables == ["users", "secrets"]
+        assert settings.observability.log_level == "WARNING"

@@ -593,7 +593,18 @@ class QueryOrchestrator:
 
                 return generated_sql, validation_result, tokens_used
 
-            except (LLMError, SecurityViolationError, SQLParseError) as e:
+            except (
+                LLMError,
+                SecurityViolationError,
+                SQLParseError,
+                RateLimitExceededError,
+            ) as e:
+                if isinstance(e, RateLimitExceededError):
+                    # Limiter saturation is not an LLM fault: surface it as-is
+                    # and never charge it to the circuit breaker, or a load
+                    # spike would open the circuit and turn a busy server into
+                    # an outage.
+                    raise
                 if _is_transient_llm_error(e) and attempt < max_retries:
                     delay = self.resilience_config.retry_delay * (
                         self.resilience_config.backoff_factor**attempt

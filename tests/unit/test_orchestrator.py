@@ -1042,3 +1042,44 @@ class TestRateLimitIntegration:
         assert not response.success
         assert response.error is not None
         assert response.error.code == ErrorCode.RATE_LIMIT_EXCEEDED.value
+
+    @pytest.mark.asyncio
+    async def test_llm_rate_limit_is_not_reported_as_llm_error(self) -> None:
+        """Saturating the *LLM* limiter must surface as rate_limit_exceeded.
+
+        It must also not be charged to the circuit breaker: load spikes are
+        not LLM faults, and accumulating failures would open the circuit and
+        turn transient saturation into a hard outage.
+        """
+        from pg_mcp.resilience.rate_limiter import MultiRateLimiter
+
+        limiter = MultiRateLimiter(query_limit=1, llm_limit=1)
+        executor = AsyncMock()
+        executor.execute.return_value = ([{"n": 1}], 1)
+        orch = QueryOrchestrator(
+            sql_generator=AsyncMock(),
+            sql_validator=MagicMock(),
+            sql_executors={"db": executor},
+            result_validator=AsyncMock(),
+            schema_cache=MagicMock(),
+            pools={"db": MagicMock()},
+            resilience_config=ResilienceConfig(rate_limit_timeout=1.0),
+            validation_config=ValidationConfig(enabled=False),
+            rate_limiter=limiter,
+        )
+        orch.sql_generator.generate.return_value = ("SELECT 1;", 1)
+        orch.sql_validator.validate_with_result.return_value = ValidationResult(
+            is_valid=True, is_select=True
+        )
+        orch.schema_cache.get.return_value = DatabaseSchema(
+            database_name="db", tables=[], version="15"
+        )
+
+        failures_before = orch.circuit_breaker.failure_count
+        async with limiter.for_llm():
+            response = await orch.execute_query(QueryRequest(question="q", database="db"))
+
+        assert not response.success
+        assert response.error is not None
+        assert response.error.code == ErrorCode.RATE_LIMIT_EXCEEDED.value
+        assert orch.circuit_breaker.failure_count == failures_before

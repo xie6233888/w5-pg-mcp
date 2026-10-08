@@ -317,12 +317,21 @@ class SQLValidator:
         if not self.blocked_columns:
             return None
 
+        # A qualified entry like "accounts.ssn" names a column, not a scope we
+        # can resolve: without a catalog we cannot tell which table an
+        # unqualified or aliased `ssn` belongs to. Blocking the bare name
+        # everywhere is the fail-safe reading -- it over-blocks rather than
+        # silently protecting nothing.
+        blocked_bare_names = {
+            entry.rsplit(".", 1)[1] for entry in self.blocked_columns if "." in entry
+        }
+
         # Find all column references
         for column in statement.find_all(exp.Column):
             column_name = column.name.lower() if column.name else ""
 
-            # Check for exact match
-            if column_name in self.blocked_columns:
+            # Check for exact match or a bare name implied by a qualified entry
+            if column_name in self.blocked_columns or column_name in blocked_bare_names:
                 return f"Access to column '{column_name}' is not allowed"
 
             # Check for qualified column names (table.column)
