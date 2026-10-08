@@ -12,10 +12,17 @@ Tests cover:
 import asyncio
 import time
 
+import asyncpg
 import pytest
 
+from pg_mcp.models.errors import DatabaseError
 from pg_mcp.resilience.circuit_breaker import CircuitBreaker, CircuitState
 from pg_mcp.resilience.rate_limiter import MultiRateLimiter, RateLimiter
+from pg_mcp.resilience.retry import (
+    TRANSIENT_DB_ERRORS,
+    is_transient_db_error,
+    retry_async,
+)
 
 
 class TestCircuitBreaker:
@@ -561,3 +568,134 @@ class TestIntegration:
         assert total == 20
         assert success_count > 0
         assert failure_count > 0
+
+
+class TestRetryAsync:
+    """Tests for the generic async retry helper."""
+
+    @pytest.mark.asyncio
+    async def test_success_first_attempt_no_retry(self) -> None:
+        calls: list[int] = []
+
+        async def op() -> str:
+            calls.append(1)
+            return "ok"
+
+        result = await retry_async(
+            op,
+            max_retries=3,
+            retry_delay=0.01,
+            backoff_factor=2.0,
+            retryable=lambda e: True,
+        )
+        assert result == "ok"
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_succeeds_after_transient_failures(self) -> None:
+        attempts: list[int] = []
+
+        async def flaky() -> str:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise ConnectionError("transient")
+            return "recovered"
+
+        result = await retry_async(
+            flaky,
+            max_retries=3,
+            retry_delay=0.01,
+            backoff_factor=2.0,
+            retryable=lambda e: isinstance(e, ConnectionError),
+        )
+        assert result == "recovered"
+        assert len(attempts) == 3
+
+    @pytest.mark.asyncio
+    async def test_exhausts_retries_and_raises_last_error(self) -> None:
+        attempts: list[int] = []
+
+        async def always_fails() -> None:
+            attempts.append(1)
+            raise ConnectionError("down")
+
+        with pytest.raises(ConnectionError, match="down"):
+            await retry_async(
+                always_fails,
+                max_retries=2,
+                retry_delay=0.01,
+                backoff_factor=2.0,
+                retryable=lambda e: isinstance(e, ConnectionError),
+            )
+        # initial attempt + 2 retries
+        assert len(attempts) == 3
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_raises_immediately(self) -> None:
+        attempts: list[int] = []
+
+        async def bad_sql() -> None:
+            attempts.append(1)
+            raise ValueError("syntax error")
+
+        with pytest.raises(ValueError, match="syntax error"):
+            await retry_async(
+                bad_sql,
+                max_retries=3,
+                retry_delay=0.01,
+                backoff_factor=2.0,
+                retryable=lambda e: isinstance(e, ConnectionError),
+            )
+        assert len(attempts) == 1
+
+    @pytest.mark.asyncio
+    async def test_exponential_backoff_delays(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        delays: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            delays.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        attempts: list[int] = []
+
+        async def always_fails() -> None:
+            attempts.append(1)
+            raise ConnectionError("down")
+
+        with pytest.raises(ConnectionError):
+            await retry_async(
+                always_fails,
+                max_retries=3,
+                retry_delay=1.0,
+                backoff_factor=2.0,
+                retryable=lambda e: True,
+            )
+        assert delays == [1.0, 2.0, 4.0]
+
+
+class TestTransientDbErrors:
+    """Tests for transient database error classification."""
+
+    def test_direct_asyncpg_connection_error_is_transient(self) -> None:
+        err = asyncpg.ConnectionDoesNotExistError("connection closed")
+        assert is_transient_db_error(err)
+
+    def test_wrapped_connection_error_via_cause_is_transient(self) -> None:
+        cause = asyncpg.ConnectionFailureError("server closed connection")
+        wrapped = DatabaseError(message="Database query failed")
+        wrapped.__cause__ = cause
+        assert is_transient_db_error(wrapped)
+
+    def test_statement_timeout_is_not_transient(self) -> None:
+        err = DatabaseError(message="Query execution exceeded timeout")
+        assert not is_transient_db_error(err)
+
+    def test_plain_postgres_error_is_not_transient(self) -> None:
+        cause = asyncpg.PostgresError("syntax error at or near SELEC")
+        wrapped = DatabaseError(message="Database query failed")
+        wrapped.__cause__ = cause
+        assert not is_transient_db_error(wrapped)
+
+    def test_transient_tuple_contains_expected_types(self) -> None:
+        assert asyncpg.ConnectionDoesNotExistError in TRANSIENT_DB_ERRORS
+        assert asyncpg.ConnectionFailureError in TRANSIENT_DB_ERRORS
