@@ -172,8 +172,8 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
 
         # Rate Limiter
         _rate_limiter = MultiRateLimiter(
-            query_limit=10,  # Can be made configurable
-            llm_limit=5,  # Can be made configurable
+            query_limit=_settings.resilience.max_concurrent_queries,
+            llm_limit=_settings.resilience.max_concurrent_llm_calls,
         )
 
         # 8. Create QueryOrchestrator
@@ -187,6 +187,7 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
             pools=_pools,
             resilience_config=_settings.resilience,
             validation_config=_settings.validation,
+            rate_limiter=_rate_limiter,
         )
 
         logger.info("PostgreSQL MCP Server initialization complete!")
@@ -234,6 +235,29 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
 
 # Create FastMCP server instance with lifespan
 mcp = FastMCP("pg-mcp", lifespan=lifespan)
+
+
+def _health_status() -> dict[str, Any]:
+    """Build the health status payload from current server globals.
+
+    Returns:
+        dict: Status string, configured databases, and component flags.
+    """
+    return {
+        "status": "ok" if _orchestrator is not None else "uninitialized",
+        "databases": sorted(_pools.keys()) if _pools else [],
+        "cache_enabled": bool(_settings and _settings.cache.enabled),
+        "metrics_enabled": bool(_settings and _settings.observability.metrics_enabled),
+        "circuit_breaker_state": (
+            str(_orchestrator.circuit_breaker.state) if _orchestrator is not None else None
+        ),
+    }
+
+
+@mcp.resource("health://status")
+def health_status() -> dict[str, Any]:
+    """Server health: configured databases and component status."""
+    return _health_status()
 
 
 @mcp.tool()
