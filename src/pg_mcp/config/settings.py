@@ -8,7 +8,7 @@ sensible defaults.
 import json
 from typing import Any, Literal, get_origin
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
@@ -266,12 +266,33 @@ class Settings(BaseSettings):
 
     # Nested configurations
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    databases: list[DatabaseConfig] = Field(
+        default_factory=list,
+        description=(
+            "Additional databases; configured via the DATABASES env var as a JSON array "
+            '(e.g. DATABASES=\'[{"name": "db2", "host": "remote"}]\')'
+        ),
+    )
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+
+    @property
+    def all_databases(self) -> list[DatabaseConfig]:
+        """Primary database plus any additional databases (primary first)."""
+        return [self.database, *self.databases]
+
+    @model_validator(mode="after")
+    def validate_database_names_unique(self) -> "Settings":
+        """Ensure all configured database names are unique."""
+        names = [db.name for db in self.all_databases]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"Duplicate database names configured: {duplicates}")
+        return self
 
     @property
     def is_production(self) -> bool:

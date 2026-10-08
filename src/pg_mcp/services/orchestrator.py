@@ -50,7 +50,7 @@ class QueryOrchestrator:
         >>> orchestrator = QueryOrchestrator(
         ...     sql_generator=generator,
         ...     sql_validator=validator,
-        ...     sql_executor=executor,
+        ...     sql_executors={"mydb": executor},
         ...     result_validator=result_validator,
         ...     schema_cache=cache,
         ...     pools={"mydb": pool},
@@ -67,7 +67,7 @@ class QueryOrchestrator:
         self,
         sql_generator: SQLGenerator,
         sql_validator: SQLValidator,
-        sql_executor: SQLExecutor,
+        sql_executors: dict[str, SQLExecutor],
         result_validator: ResultValidator,
         schema_cache: SchemaCache,
         pools: dict[str, Pool],
@@ -79,7 +79,8 @@ class QueryOrchestrator:
         Args:
             sql_generator: SQL generation service.
             sql_validator: SQL validation service.
-            sql_executor: SQL execution service.
+            sql_executors: Mapping from database name to its SQL executor, so a
+                request runs against the database it resolved to.
             result_validator: Result validation service.
             schema_cache: Schema cache instance.
             pools: Dictionary mapping database names to connection pools.
@@ -88,7 +89,7 @@ class QueryOrchestrator:
         """
         self.sql_generator = sql_generator
         self.sql_validator = sql_validator
-        self.sql_executor = sql_executor
+        self.sql_executors = sql_executors
         self.result_validator = result_validator
         self.schema_cache = schema_cache
         self.pools = pools
@@ -191,11 +192,12 @@ class QueryOrchestrator:
                     tokens_used=tokens_used,
                 )
 
-            # Step 5: Execute SQL
+            # Step 5: Execute SQL on the resolved database's executor
+            executor = self._get_executor(database_name)
             logger.debug("Executing SQL", extra={"request_id": request_id})
             start_time = self._get_current_time_ms()
 
-            results, total_count = await self.sql_executor.execute(generated_sql)
+            results, total_count = await executor.execute(generated_sql)
 
             execution_time_ms = self._get_current_time_ms() - start_time
             logger.info(
@@ -323,6 +325,29 @@ class QueryOrchestrator:
             message="Multiple databases available, please specify which to query",
             details={"available_databases": available_dbs},
         )
+
+    def _get_executor(self, database_name: str) -> SQLExecutor:
+        """Get the SQL executor for a resolved database name.
+
+        Args:
+            database_name: Resolved database name.
+
+        Returns:
+            SQLExecutor: Executor bound to that database's pool.
+
+        Raises:
+            DatabaseError: If no executor exists for the name.
+        """
+        executor = self.sql_executors.get(database_name)
+        if executor is None:
+            raise DatabaseError(
+                message=f"No SQL executor configured for database '{database_name}'",
+                details={
+                    "database": database_name,
+                    "available_executors": sorted(self.sql_executors.keys()),
+                },
+            )
+        return executor
 
     async def _generate_sql_with_retry(
         self,

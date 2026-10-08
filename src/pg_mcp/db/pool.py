@@ -4,6 +4,8 @@ This module provides utilities for creating and managing asyncpg connection
 pools for PostgreSQL databases.
 """
 
+import asyncio
+
 import asyncpg
 from asyncpg import Pool
 
@@ -70,13 +72,8 @@ async def create_pools(configs: list[DatabaseConfig]) -> dict[str, Pool]:
         >>> pools = await create_pools(configs)
         >>> assert "db1" in pools and "db2" in pools
     """
-    pools: dict[str, Pool] = {}
-
-    for config in configs:
-        pool = await create_pool(config)
-        pools[config.name] = pool
-
-    return pools
+    pool_list = await asyncio.gather(*(create_pool(config) for config in configs))
+    return {config.name: pool for config, pool in zip(configs, pool_list, strict=True)}
 
 
 async def close_pools(pools: dict[str, Pool], timeout: float = 10.0) -> None:  # noqa: ASYNC109

@@ -14,11 +14,10 @@ from mcp.server.fastmcp import FastMCP
 
 from pg_mcp.cache.schema_cache import SchemaCache
 from pg_mcp.config.settings import Settings
-from pg_mcp.db.pool import close_pools, create_pool
+from pg_mcp.db.pool import close_pools, create_pools
 from pg_mcp.models.query import QueryRequest, QueryResponse, ReturnType
 from pg_mcp.observability.logging import configure_logging, get_logger
 from pg_mcp.observability.metrics import MetricsCollector
-from pg_mcp.resilience.circuit_breaker import CircuitBreaker
 from pg_mcp.resilience.rate_limiter import MultiRateLimiter
 from pg_mcp.services.orchestrator import QueryOrchestrator
 from pg_mcp.services.result_validator import ResultValidator
@@ -34,7 +33,6 @@ _pools: dict[str, Pool] | None = None
 _schema_cache: SchemaCache | None = None
 _orchestrator: QueryOrchestrator | None = None
 _metrics: MetricsCollector | None = None
-_circuit_breaker: CircuitBreaker | None = None
 _rate_limiter: MultiRateLimiter | None = None
 
 
@@ -69,7 +67,7 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
         ...     pass
     """
     global _settings, _pools, _schema_cache, _orchestrator, _metrics
-    global _circuit_breaker, _rate_limiter
+    global _rate_limiter
 
     logger.info("Starting PostgreSQL MCP Server initialization...")
 
@@ -94,19 +92,14 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
             },
         )
 
-        # 3. Create database connection pools
+        # 3. Create database connection pools (primary + additional)
         logger.info("Creating database connection pools...")
-        _pools = {}
-        # Note: For single database configuration, we use the main database config
-        pool = await create_pool(_settings.database)
-        _pools[_settings.database.name] = pool
-        logger.info(
-            f"Created connection pool for database '{_settings.database.name}'",
-            extra={
-                "min_size": _settings.database.min_pool_size,
-                "max_size": _settings.database.max_pool_size,
-            },
-        )
+        _pools = await create_pools(_settings.all_databases)
+        for db_config in _settings.all_databases:
+            logger.info(
+                f"Created connection pool for database '{db_config.name}'",
+                extra={"min_size": db_config.min_pool_size, "max_size": db_config.max_pool_size},
+            )
 
         # 4. Load Schema cache
         logger.info("Initializing schema cache...")
@@ -157,16 +150,16 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
             allow_explain=_settings.security.allow_explain,
         )
 
-        # SQL Executor (create one per database)
+        # SQL Executors (one per database, each with its own db config)
         sql_executors: dict[str, SQLExecutor] = {}
-        for db_name, pool in _pools.items():
+        for db_config in _settings.all_databases:
             executor = SQLExecutor(
-                pool=pool,
+                pool=_pools[db_config.name],
                 security_config=_settings.security,
-                db_config=_settings.database,
+                db_config=db_config,
             )
-            sql_executors[db_name] = executor
-            logger.info(f"Created SQL executor for database '{db_name}'")
+            sql_executors[db_config.name] = executor
+            logger.info(f"Created SQL executor for database '{db_config.name}'")
 
         # Result Validator
         result_validator = ResultValidator(
@@ -176,12 +169,6 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
 
         # 7. Initialize resilience components
         logger.info("Initializing resilience components...")
-
-        # Circuit Breaker for LLM calls
-        _circuit_breaker = CircuitBreaker(
-            failure_threshold=_settings.resilience.circuit_breaker_threshold,
-            recovery_timeout=_settings.resilience.circuit_breaker_timeout,
-        )
 
         # Rate Limiter
         _rate_limiter = MultiRateLimiter(
@@ -194,7 +181,7 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
         _orchestrator = QueryOrchestrator(
             sql_generator=sql_generator,
             sql_validator=sql_validator,
-            sql_executor=sql_executors[_settings.database.name],  # Use primary executor
+            sql_executors=sql_executors,
             result_validator=result_validator,
             schema_cache=_schema_cache,
             pools=_pools,

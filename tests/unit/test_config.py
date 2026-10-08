@@ -480,3 +480,48 @@ class TestSettingsGlobalInstance:
         assert settings.openai.model == "gpt-4"
         assert settings.database.host == "env.host.com"
         assert settings.security.max_rows == 5000
+
+
+class TestMultiDatabaseSettings:
+    """Settings.databases list + all_databases property."""
+
+    @pytest.fixture(autouse=True)
+    def _openai_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Settings requires a non-empty OpenAI key; unrelated to these tests."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    def test_all_databases_primary_only_by_default(self) -> None:
+        settings = Settings(database=DatabaseConfig(name="main"))
+        assert [db.name for db in settings.all_databases] == ["main"]
+
+    def test_all_databases_includes_extra(self) -> None:
+        settings = Settings(
+            database=DatabaseConfig(name="main"),
+            databases=[DatabaseConfig(name="extra", host="remote")],
+        )
+        assert [db.name for db in settings.all_databases] == ["main", "extra"]
+
+    def test_databases_from_json_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATABASES", '[{"name": "db2", "host": "remote"}, {"name": "db3"}]')
+        settings = Settings(database=DatabaseConfig(name="main"))
+        assert [db.name for db in settings.databases] == ["db2", "db3"]
+        assert settings.databases[0].host == "remote"
+
+    def test_databases_malformed_json_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATABASES", "not-json")
+        with pytest.raises(Exception, match="databases"):
+            Settings(database=DatabaseConfig(name="main"))
+
+    def test_duplicate_names_between_primary_and_extra_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Duplicate database names"):
+            Settings(
+                database=DatabaseConfig(name="main"),
+                databases=[DatabaseConfig(name="main")],
+            )
+
+    def test_duplicate_names_within_extras_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Duplicate database names"):
+            Settings(
+                database=DatabaseConfig(name="main"),
+                databases=[DatabaseConfig(name="dup"), DatabaseConfig(name="dup")],
+            )
